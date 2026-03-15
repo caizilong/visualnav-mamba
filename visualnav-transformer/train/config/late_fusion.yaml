@@ -1,0 +1,120 @@
+project_name: vint-release            # 与其它 ViNT 实验共用项目
+run_name: vint-late-fusion           # late-fusion 版本 ViNT 的实验名
+
+# ---------------- 训练设置 ----------------
+use_wandb: True                      # 是否启用 wandb
+train: True
+batch_size: 256
+epochs: 100
+gpu_ids: [0]
+num_workers: 12
+lr: 5e-4
+optimizer: adamw
+clipping: False
+max_norm: 1.
+scheduler: "cosine"
+warmup: False                        # 与 vint.yaml 不同，这里不启用 warmup
+warmup_epochs: 4
+cyclic_period: 10
+plateau_patience: 3
+plateau_factor: 0.5
+seed: 0
+
+
+# ---------------- 模型参数（late fusion 版本 ViNT） ----------------
+model_type: vint
+obs_encoder: "efficientnet-b0"      # 观测编码 backbone
+obs_encoding_size: 512
+mha_num_attention_heads: 4
+mha_num_attention_layers: 4
+mha_ff_dim_factor: 4
+late_fusion: True                    # 与 vint.yaml 中的 False 相对应：obs/goal 分别编码后再融合
+
+# ---------------- 动作空间归一化 ----------------
+normalize: True
+
+# ---------------- 上下文设置 ----------------
+context_type: temporal
+context_size: 0                      # 仅使用“当前观测”，不使用历史帧
+
+# ---------------- 损失权重 ----------------
+alpha: 0.5
+
+# ---------------- 距离 / 动作 标签范围 ----------------
+distance:
+  min_dist_cat: 0
+  max_dist_cat: 20
+action:
+  min_dist_cat: 0
+  max_dist_cat: 10
+close_far_threshold: 10              # 区分近/远子目标阈值
+
+# ---------------- 动作输出配置 ----------------
+len_traj_pred: 5
+learn_angle: True
+
+# ---------------- 数据集设置 ----------------
+image_size: [85, 64]                 # [宽, 高]
+goal_type: "image"
+
+datasets:
+  recon:
+    data_folder: /home/<username>/vint_dataset/recon
+    train: /home/<username>/data_splits/recon/train/
+    test: /home/<username>/data_splits/recon/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+  go_stanford:
+    data_folder: /home/<username>/vint_dataset/go_stanford_cropped
+    train: /home/<username>/data_splits/go_stanford/train/
+    test: /home/<username>/data_splits/go_stanford/test/
+    end_slack: 0
+    goals_per_obs: 2                 # 扩充样本量
+    negative_mining: True
+  cory_hall:
+    data_folder: /home/<username>/vint_dataset/cory_hall/
+    train: /home/<username>/data_splits/cory_hall/train/
+    test: /home/<username>/data_splits/cory_hall/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+  tartan_drive:
+    data_folder: /home/<username>/vint_dataset/tartan_drive/
+    train: /home/<username>/data_splits/tartan_drive/train/
+    test: /home/<username>/data_splits/tartan_drive/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+  sacson:
+    data_folder: /home/<username>/vint_dataset/sacson/
+    train: /home/<username>/data_splits/sacson/train/
+    test: /home/<username>/data_splits/sacson/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+
+  # 私有数据集（有权限时可启用）
+  # seattle:
+  #   data_folder: /home/<username>/vint_dataset/seattle/
+  #   train: /home/<username>/data_splits/seattle/train/
+  #   test: /home/<username>/data_splits/seattle/test/
+  #   end_slack: 0
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  # scand:
+  #   data_folder: /home/<username>/vint_dataset/scand/
+  #   train: /home/<username>/data_splits/scand/train/
+  #   test: /home/<username>/data_splits/scand/test/
+  #   end_slack: 0
+  #   goals_per_obs: 1
+  #   negative_mining: True
+
+# ---------------- 日志与评估配置 ----------------
+print_log_freq: 100
+image_log_freq: 1000                 # 0 时可关闭图像日志
+num_images_log: 8
+pairwise_test_freq: 0
+eval_fraction: 0.25
+wandb_log_freq: 10
+eval_freq: 1

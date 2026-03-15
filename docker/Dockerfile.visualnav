@@ -1,0 +1,4 @@
+# 基于「原 cai 容器」提交的完整快照镜像（包含该容器内所有已装环境）
+# 先执行: docker commit docker-cai cai-snapshot:latest
+FROM cai-snapshot:latest
+WORKDIR /workspace

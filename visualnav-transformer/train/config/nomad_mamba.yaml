@@ -1,0 +1,131 @@
+project_name: nomad                 # 新的 Mamba 版本 NoMaD 项目名
+run_name: nomad_mamba               # 实验名（训练时会拼接时间戳）
+
+# ---------------- 训练设置 ----------------
+use_wandb: True                           # 是否启用 wandb
+train: True
+batch_size: 128
+epochs: 150
+gpu_ids: [0]
+num_workers: 12
+lr: 5e-5                                  
+optimizer: adamw
+clipping: False
+max_norm: 1.
+scheduler: "cosine"
+warmup: True
+warmup_epochs: 4
+cyclic_period: 10
+plateau_patience: 3
+plateau_factor: 0.5
+seed: 0
+
+# ---------------- 模型参数 ----------------
+model_type: nomad
+vision_encoder: nomad_mamba               # 关键：使用新的 Mamba 版视觉编码器
+encoding_size: 256                        # 与 NoMaD_Mamba 输出维度保持一致
+obs_encoder: efficientnet-b0
+attn_unet: False
+cond_predict_scale: False
+mha_num_attention_heads: 4                # 这里用于控制 Mamba 层数/配置
+mha_num_attention_layers: 4               # NoMaD_Mamba 中的 Mamba 层数
+mha_ff_dim_factor: 4
+down_dims: [64, 128, 256]
+
+# Mamba2 超参数（可选，不设置则使用 MambaConfig 默认值；对 encoding_size=256 短序列建议较小值）
+mamba_d_state: 64
+mamba_d_conv: 4
+mamba_expand: 2
+mamba_headdim: 64
+mamba_chunk_size: 256
+mamba_use_mem_eff_path: true
+
+# ---------------- 扩散模型参数 ----------------
+num_diffusion_iters: 10
+
+# ---------------- 目标 mask 相关 ----------------
+goal_mask_prob: 0.5
+
+# ---------------- 动作空间归一化 ----------------
+normalize: True
+
+# ---------------- 上下文设置 ----------------
+context_type: temporal
+context_size: 5
+alpha: 1e-4                               # 与原 NoMaD 相同：距离损失权重很小
+
+# ---------------- 距离 / 动作 标签范围 ----------------
+distance:
+  min_dist_cat: 0
+  max_dist_cat: 20
+action:
+  min_dist_cat: 3
+  max_dist_cat: 20
+
+# ---------------- 动作输出配置 ----------------
+len_traj_pred: 8
+learn_angle: False
+
+# ---------------- 数据集设置 ----------------
+image_size: [96, 96]                      # [宽, 高]，NoMaD 使用方形图像
+datasets:
+  go_stanford:
+    data_folder: /workspace/datasets/go_stanford
+    train: vint_train/data/data_splits/go_stanford/train/
+    test: vint_train/data/data_splits/go_stanford/test/
+    end_slack: 0 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
+    goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
+    negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略
+  recon:
+    data_folder: /workspace/datasets/recon
+    train: vint_train/data/data_splits/recon/train/ # path to train folder with traj_names.txt
+    test: vint_train/data/data_splits/recon/test/ # path to test folder with traj_names.txt
+    end_slack: 3 # because many trajectories end in collisions
+    goals_per_obs: 1 # how many goals are sampled per observation
+    negative_mining: True # negative mining from the ViNG paper (Shah et al.)
+  # recon:
+  #   data_folder: /home/<username>/nomad_dataset/recon
+  #   train: /home/<username>/data_splits/recon/train/
+  #   test: /home/<username>/data_splits/recon/test/
+  #   end_slack: 3
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  # go_stanford:
+  #   data_folder: /home/<username>/nomad_dataset/go_stanford_cropped
+  #   train: /home/<username>/data_splits/go_stanford/train/
+  #   test: /home/<username>/data_splits/go_stanford/test/
+  #   end_slack: 0
+  #   goals_per_obs: 2
+  #   negative_mining: True
+  # cory_hall:
+  #   data_folder: /home/<username>/nomad_dataset/cory_hall/
+  #   train: /home/<username>/data_splits/cory_hall/train/
+  #   test: /home/<username>/data_splits/cory_hall/test/
+  #   end_slack: 3
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  # tartan_drive:
+  #   data_folder: /home/<username>/nomad_dataset/tartan_drive/
+  #   train: /home/<username>/data_splits/tartan_drive/train/
+  #   test: /home/<username>/data_splits/tartan_drive/test/
+  #   end_slack: 3
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  # sacson:
+  #   data_folder: /home/<username>/nomad_dataset/sacson/
+  #   train: /home/<username>/data_splits/sacson/train/
+  #   test: /home/<username>/data_splits/sacson/test/
+  #   end_slack: 3
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  # 如有其它私有数据集，可按需仿照上面格式添加
+
+# ---------------- 日志与评估配置 ----------------
+print_log_freq: 100
+image_log_freq: 10000
+num_images_log: 8
+pairwise_test_freq: 0
+eval_fraction: 0.25
+wandb_log_freq: 50                     # 每 50 个 batch 上传一次，降低 wandb 同步频率
+eval_freq: 1
+

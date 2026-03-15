@@ -1,0 +1,65 @@
+# 默认训练配置（被其它 config 如 vint.yaml 覆盖）
+project_name: vint          # 默认项目名称（wandb 等日志用）
+run_name: vint              # 默认实验名（会在 train.py 中再拼接时间戳）
+
+# 训练相关设置
+use_wandb: True             # 是否启用 wandb 日志
+train: True                 # True 为训练 + 测试，False 只做测试
+batch_size: 400
+eval_batch_size: 400        # 若未设置则在 train.py 中默认等于 batch_size
+epochs: 30
+gpu_ids: [0]                # GPU 编号列表（支持多卡）
+num_workers: 4              # DataLoader 的 worker 数
+lr: 5e-4                    # 初始学习率
+optimizer: adam             # [adam, adamw, sgd] 之一
+seed: 0                     # 随机种子
+clipping: False             # 是否开启梯度裁剪（train.py 中用 hook 控制）
+train_subset: 1.            # 使用训练集的比例（1. 表示全量）
+
+# 模型参数（默认使用 GNM）
+model_type: gnm             # [gnm, vint, nomad] 等
+obs_encoding_size: 1024     # 观测编码维度（传给 GNM / ViNT 构造函数）
+goal_encoding_size: 1024    # 目标编码维度
+
+# 动作空间归一化
+normalize: True             # 是否在数据集内对 (dx, dy) 等做归一化
+
+# 上下文（时序输入方式）
+context_type: temporal      # 目前实现的是时间序列上下文（连续多帧）
+context_size: 5             # 历史帧数
+
+# 损失函数中“距离 vs 动作”的权重（train_utils._compute_losses 中使用）
+alpha: 0.5                  # 越大越重视距离损失，越小越重视动作损失
+
+# 任务损失 vs KLD 的权重（如果使用变分模型会用到，这个 repo 中暂未明显使用）
+beta: 0.1
+
+obs_type: image             # 观测模态（目前仅支持图像）
+goal_type: image            # 目标模态（目前仅支持图像）
+scheduler: null             # 学习率调度器类型；null 表示不启用
+
+# 距离与动作标签的离散范围（单位是“时间步类别”）
+distance:
+  min_dist_cat: 0           # 最小距离类别（含）
+  max_dist_cat: 20          # 最大距离类别（含）
+action:
+  min_dist_cat: 2           # 参与动作损失的最小距离类别
+  max_dist_cat: 10          # 参与动作损失的最大距离类别
+close_far_threshold: 10     # 将 subgoal 分成“近/远”的阈值（某些采样策略使用）
+
+# 动作输出相关
+len_traj_pred: 5            # 未来预测的 waypoint 数
+learn_angle: True           # 是否预测 yaw（角度），影响 num_action_params=2/4
+
+# 数据集相关
+image_size: [85, 64]        # [宽, 高]；会在数据预处理与 DataLoader 中使用
+
+# 日志与可视化（=0 代表关闭）
+print_log_freq: 100         # 每隔多少个 iteration 打印一次 loss
+image_log_freq: 1000        # 每隔多少 iteration 记录一次可视化图像
+num_images_log: 8           # 每次可视化记录的样本个数
+pairwise_test_freq: 10      # （若启用）成对测试的频率（epoch 级）
+eval_fraction: 0.25         # 每个 epoch 评估时使用多少比例的数据
+wandb_log_freq: 10          # wandb scalar 日志频率（以 iteration 计）
+eval_freq: 1                # 评估频率（以 epoch 计）
+

@@ -1,0 +1,120 @@
+project_name: vint-release          # wandb 项目名
+run_name: vint-5c                   # 此次实验名称（会被 train.py 加时间戳）
+
+# ---------------- 训练相关设置（覆盖 defaults.yaml） ----------------
+use_wandb: True                     # 是否记录到 wandb
+train: True                         # 是否训练
+batch_size: 256
+epochs: 100
+gpu_ids: [0]
+num_workers: 12
+lr: 5e-4                            # 学习率
+optimizer: adamw                    # ViNT 默认用 AdamW
+clipping: False
+max_norm: 1.                        # 若 clipping=True，用于 clip 梯度范围
+scheduler: "cosine"                 # 学习率调度器类型：余弦退火
+warmup: True                        # 是否使用 warmup（在 train.py 中包裹 scheduler）
+warmup_epochs: 4
+cyclic_period: 10                   # 若 scheduler 为 cyclic 时使用（这里暂不用）
+plateau_patience: 3                 # 若为 ReduceLROnPlateau，对应 patience
+plateau_factor: 0.5                 # ReduceLROnPlateau 的 factor
+seed: 0
+
+# ---------------- ViNT 模型参数 ----------------
+model_type: vint
+obs_encoder: "efficientnet-b0"      # 观测编码 backbone，默认是 ImageNet 预训练 EfficientNet-B0
+obs_encoding_size: 512              # ViNT 中 obs / goal encoding 的维度
+mha_num_attention_heads: 4          # MultiLayerDecoder 中多头注意力的头数
+mha_num_attention_layers: 4         # Transformer Encoder 的层数
+mha_ff_dim_factor: 4                # 前馈层宽度 = mha_ff_dim_factor * embed_dim
+late_fusion: False                  # False: 早期融合（obs+goal 拼接编码），True: 后期融合
+
+# ---------------- 动作空间归一化 ----------------
+normalize: True                     # 是否对轨迹做归一化（在数据预处理和 loss 中使用）
+
+# ---------------- 上下文（时序输入） ----------------
+context_type: temporal              # 使用最近 context_size 帧作为时序上下文
+context_size: 5                     # 使用 5 帧上下文
+
+# 距离 vs 动作 损失的权重
+alpha: 0.5
+
+# ---------------- 距离 / 动作 标签的类别范围 ----------------
+distance:
+  min_dist_cat: 0
+  max_dist_cat: 20
+action:
+  min_dist_cat: 0                   # 与 defaults 中 GNM 设置不同，这里动作在更短距离即可监督
+  max_dist_cat: 10
+close_far_threshold: 10             # 按时间距离划分“近/远”子目标的阈值
+
+# ---------------- 动作输出相关参数 ----------------
+len_traj_pred: 5                    # ViNT 预测 5 个未来 waypoint
+learn_angle: True                   # 同时预测 yaw（以 sin/cos 形式）
+
+# ---------------- 数据集形状与模态 ----------------
+image_size: [85, 64]                # [宽, 高]，ViNT 训练使用的图像尺寸
+goal_type: "image"                  # 目标模态为图像
+
+# ---------------- 多数据集设置 ----------------
+datasets:
+  recon:
+    data_folder: /home/<username>/vint_dataset/recon
+    train: /home/<username>/data_splits/recon/train/   # train split 的 traj_names.txt 所在目录
+    test: /home/<username>/data_splits/recon/test/     # test split 的 traj_names.txt 所在目录
+    end_slack: 3              # 轨迹尾部忽略的步数（结尾经常是碰撞等无效数据）
+    goals_per_obs: 1          # 每个观测采样的目标数
+    negative_mining: True     # 是否启用负样本挖掘（ViNG 论文中的策略）
+  go_stanford:
+    data_folder: /home/<username>/vint_dataset/go_stanford_cropped
+    train: /home/<username>/data_splits/go_stanford/train/
+    test: /home/<username>/data_splits/go_stanford/test/
+    end_slack: 0
+    goals_per_obs: 2          # 增加每个观测的目标数以扩充数据量
+    negative_mining: True
+  cory_hall:
+    data_folder: /home/<username>/vint_dataset/cory_hall/
+    train: /home/<username>/data_splits/cory_hall/train/
+    test: /home/<username>/data_splits/cory_hall/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+  tartan_drive:
+    data_folder: /home/<username>/vint_dataset/tartan_drive/
+    train: /home/<username>/data_splits/tartan_drive/train/
+    test: /home/<username>/data_splits/tartan_drive/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+  sacson:
+    data_folder: /home/<username>/vint_dataset/sacson/
+    train: /home/<username>/data_splits/sacson/train/
+    test: /home/<username>/data_splits/sacson/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+
+  # 私有数据集（若有权限可取消注释并填写路径）
+  # seattle:
+  #   data_folder: /home/<username>/vint_dataset/seattle/
+  #   train: /home/<username>/data_splits/seattle/train/
+  #   test: /home/<username>/data_splits/seattle/test/
+  #   end_slack: 0
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  # scand:
+  #   data_folder: /home/<username>/vint_dataset/scand/
+  #   train: /home/<username>/data_splits/scand/train/
+  #   test: /home/<username>/data_splits/scand/test/
+  #   end_slack: 0
+  #   goals_per_obs: 1
+  #   negative_mining: True
+
+# ---------------- 日志相关（覆盖 defaults） ----------------
+print_log_freq: 100                 # iteration 级打印频率
+image_log_freq: 1000                # 可视化频率（0 表示关闭）
+num_images_log: 8
+pairwise_test_freq: 0               # 不做 pairwise 测试
+eval_fraction: 0.25                 # 评估时只用 25% 数据
+wandb_log_freq: 10                  # wandb 日志频率
+eval_freq: 1                        # 每个 epoch 后做一次评估

@@ -1,0 +1,110 @@
+# NOTE: this model uses private datasets
+
+project_name: vint-release         # 与 ViNT 共用同一 wandb 项目
+run_name: gnm                     # 使用 GNM 模型的实验名
+
+# ---------------- 训练设置 ----------------
+use_wandb: True                   # 是否记录到 wandb
+train: True
+batch_size: 400
+eval_batch_size: 400
+epochs: 30
+gpu_ids: [0] 
+num_workers: 4
+lr: 7e-4                          # GNM 使用略大的学习率
+optimizer: adam
+seed: 0
+
+# ---------------- 模型参数 ----------------
+model_type: gnm
+obs_encoding_size: 1024           # 传给 GNM 构造函数，用于压缩 MobileNet 输出
+goal_encoding_size: 1024
+
+# ---------------- 动作空间归一化 ----------------
+normalize: True
+
+# ---------------- 上下文设置 ----------------
+context_type: temporal            # 也可以改成 randomized 做随机上下文采样
+context_size: 5
+
+# ---------------- 损失权重 ----------------
+alpha: 0.5                        # 距离 / 动作 损失的权重
+
+# ---------------- 距离/动作 标签类别范围 ----------------
+distance:
+  min_dist_cat: 0
+  max_dist_cat: 20
+action:
+  min_dist_cat: 2
+  max_dist_cat: 10
+close_far_threshold: 10           # 用于划分近/远子目标的距离阈值
+
+# ---------------- 动作输出配置 ----------------
+len_traj_pred: 5
+learn_angle: True
+
+# ---------------- 数据集设置 ----------------
+image_size: [85, 64]              # 输入图像分辨率 [宽, 高]
+goal_type: "image"
+
+datasets:
+  recon:
+    data_folder: /home/<username>/vint_dataset/recon
+    train: /home/<username>/data_splits/recon/train/   # train split 的 traj_names.txt
+    test: /home/<username>/data_splits/recon/test/     # test split 的 traj_names.txt
+    end_slack: 3                  # 末尾若是碰撞帧则忽略几步
+    goals_per_obs: 1
+    negative_mining: True         # 使用 ViNG 里的负样本挖掘
+  go_stanford:
+    data_folder: /home/<username>/vint_dataset/go_stanford_cropped
+    train: /home/<username>/data_splits/go_stanford/train/
+    test: /home/<username>/data_splits/go_stanford/test/
+    end_slack: 0
+    goals_per_obs: 2              # 提高样本数量
+    negative_mining: True
+  cory_hall:
+    data_folder: /home/<username>/vint_dataset/cory_hall/
+    train: /home/<username>/data_splits/cory_hall/train/
+    test: /home/<username>/data_splits/cory_hall/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+  tartan_drive:
+    data_folder: /home/<username>/vint_dataset/tartan_drive/
+    train: /home/<username>/data_splits/tartan_drive/train/
+    test: /home/<username>/data_splits/tartan_drive/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+  sacson:
+    data_folder: /home/<username>/vint_dataset/sacson/
+    train: /home/<username>/data_splits/sacson/train/
+    test: /home/<username>/data_splits/sacson/test/
+    end_slack: 3
+    goals_per_obs: 1
+    negative_mining: True
+
+  # 私有数据集（如有访问权限可取消注释）
+  # seattle:
+  #   data_folder: /home/<username>/vint_dataset/seattle/
+  #   train: /home/<username>/data_splits/seattle/train/
+  #   test: /home/<username>/data_splits/seattle/test/
+  #   end_slack: 0
+  #   goals_per_obs: 1
+  #   negative_mining: True
+  # scand:
+  #   data_folder: /home/<username>/vint_dataset/scand/
+  #   train: /home/<username>/data_splits/scand/train/
+  #   test: /home/<username>/data_splits/scand/test/
+  #   end_slack: 0
+  #   goals_per_obs: 1
+  #   negative_mining: True
+
+
+# ---------------- 日志与评估配置 ----------------
+print_log_freq: 100                # 每 100 个 iteration 打印一次
+image_log_freq: 1000               # 每 1000 步记录一次图像
+num_images_log: 8
+pairwise_test_freq: 20             # 每 20 个 epoch 进行一次 pairwise 测试
+wandb_log_freq: 10
+eval_freq: 1
