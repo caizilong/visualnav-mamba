@@ -227,24 +227,27 @@ def train_eval_loop_nomad(
             )
             lr_scheduler.step()
 
-        numbered_path = os.path.join(project_folder, f"ema_{epoch}.pth")
-        torch.save(ema_model.averaged_model.state_dict(), numbered_path)
-        numbered_path = os.path.join(project_folder, f"ema_latest.pth")
-        print(f"Saved EMA model to {numbered_path}")
+        ema_epoch_path = os.path.join(project_folder, f"ema_{epoch}.pth")
+        ema_latest_path = os.path.join(project_folder, "ema_latest.pth")
+        torch.save(ema_model.averaged_model.state_dict(), ema_epoch_path)
+        torch.save(ema_model.averaged_model.state_dict(), ema_latest_path)
+        print(f"Saved EMA model to {ema_epoch_path} and {ema_latest_path}")
 
-        numbered_path = os.path.join(project_folder, f"{epoch}.pth")
-        torch.save(model.state_dict(), numbered_path)
+        model_epoch_path = os.path.join(project_folder, f"{epoch}.pth")
+        torch.save(model.state_dict(), model_epoch_path)
         torch.save(model.state_dict(), latest_path)
-        print(f"Saved model to {numbered_path}")
+        print(f"Saved model to {model_epoch_path}")
 
         # save optimizer
-        numbered_path = os.path.join(project_folder, f"optimizer_{epoch}.pth")
-        latest_optimizer_path = os.path.join(project_folder, f"optimizer_latest.pth")
+        optimizer_epoch_path = os.path.join(project_folder, f"optimizer_{epoch}.pth")
+        latest_optimizer_path = os.path.join(project_folder, "optimizer_latest.pth")
+        torch.save(optimizer.state_dict(), optimizer_epoch_path)
         torch.save(optimizer.state_dict(), latest_optimizer_path)
 
         # save scheduler
-        numbered_path = os.path.join(project_folder, f"scheduler_{epoch}.pth")
-        latest_scheduler_path = os.path.join(project_folder, f"scheduler_latest.pth")
+        scheduler_epoch_path = os.path.join(project_folder, f"scheduler_{epoch}.pth")
+        latest_scheduler_path = os.path.join(project_folder, "scheduler_latest.pth")
+        torch.save(lr_scheduler.state_dict(), scheduler_epoch_path)
         torch.save(lr_scheduler.state_dict(), latest_scheduler_path)
 
 

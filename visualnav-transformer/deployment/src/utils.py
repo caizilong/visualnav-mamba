@@ -76,14 +76,18 @@ def load_model(
             vision_encoder = replace_bn_with_gn(vision_encoder)
         elif config["vision_encoder"] == "nomad_mamba":
             # 使用 Mamba2 作为时序建模模块的 NoMaD 视觉编码器
+            # 配置中的 image_size 为 [宽, 高]，timm 相关 backbone 需要 (高, 宽)
+            img_size_hw = (config["image_size"][1], config["image_size"][0])
             vision_encoder = NoMaD_Mamba(
                 context_size=config["context_size"],
                 obs_encoder=config.get("obs_encoder", "efficientnet-b0"),
+                goal_encoder=config.get("goal_encoder", None),
                 obs_encoding_size=config["encoding_size"],
                 mha_num_attention_heads=config["mha_num_attention_heads"],
                 mha_num_attention_layers=config["mha_num_attention_layers"],
                 mha_ff_dim_factor=config["mha_ff_dim_factor"],
                 mamba_cfg=MambaConfig.from_dict(config),
+                img_size=img_size_hw,
             )
         elif config["vision_encoder"] == "vit": 
             vision_encoder = ViT(

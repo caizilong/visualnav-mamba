@@ -200,15 +200,10 @@ def main(config):
                 img_size=img_size_hw,  # 传递图像尺寸给 ViT 类模型
             )
             # 注：_create_timm_encoder 内部已调用 replace_bn_with_gn，无需重复调用
-        elif config["vision_encoder"] == "vib": 
-            vision_encoder = ViB(
-                obs_encoding_size=config["encoding_size"],
-                context_size=config["context_size"],
-                mha_num_attention_heads=config["mha_num_attention_heads"],
-                mha_num_attention_layers=config["mha_num_attention_layers"],
-                mha_ff_dim_factor=config["mha_ff_dim_factor"],
+        elif config["vision_encoder"] == "vib":
+            raise NotImplementedError(
+                "`vision_encoder: vib` 尚未在当前代码库中实现，请改用 `nomad_vint`、`nomad_mamba` 或 `vit`。"
             )
-            vision_encoder = replace_bn_with_gn(vision_encoder)
         elif config["vision_encoder"] == "vit": 
             vision_encoder = ViT(
                 obs_encoding_size=config["encoding_size"],
