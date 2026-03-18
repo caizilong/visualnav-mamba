@@ -125,7 +125,7 @@ def train_eval_loop(
             "scheduler": scheduler
         }
         # log average eval loss
-        wandb.log({}, commit=False)
+        wandb.log({"epoch": epoch}, commit=False)
 
         if scheduler is not None:
             # scheduler calls based on the type of scheduler
@@ -134,6 +134,7 @@ def train_eval_loop(
             else:
                 scheduler.step()
         wandb.log({
+            "epoch": epoch,
             "avg_total_test_loss": np.mean(avg_total_test_loss),
             "lr": optimizer.param_groups[0]["lr"],
         }, commit=False)
@@ -143,7 +144,7 @@ def train_eval_loop(
         torch.save(checkpoint, numbered_path)  # keep track of model at every epoch
 
     # Flush the last set of eval logs
-    wandb.log({})
+    wandb.log({"epoch": current_epoch + epochs - 1})
     print()
 
 def train_eval_loop_nomad(
@@ -270,12 +271,13 @@ def train_eval_loop_nomad(
                     eval_fraction=eval_fraction,
                 )
         wandb.log({
+            "epoch": epoch,
             "lr": optimizer.param_groups[0]["lr"],
         }, commit=False)
 
         
     # Flush the last set of eval logs
-    wandb.log({})
+    wandb.log({"epoch": current_epoch + epochs - 1})
     print()
 
 def load_model(model, model_type, checkpoint: dict) -> None:

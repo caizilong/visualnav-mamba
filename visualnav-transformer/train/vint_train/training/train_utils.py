@@ -148,7 +148,9 @@ def _log_data(
                 print(f"(epoch {epoch}) {logger.full_name()} {logger.average()}")
 
     if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-        wandb.log(data_log, commit=wandb_increment_step)
+        wandb_data_log = {"epoch": epoch}
+        wandb_data_log.update(data_log)
+        wandb.log(wandb_data_log, commit=wandb_increment_step)
 
     if image_log_freq != 0 and i % image_log_freq == 0:
         visualize_dist_pred(
@@ -700,9 +702,9 @@ def train_nomad(
             # Logging
             loss_cpu = loss.item()
             tepoch.set_postfix(loss=loss_cpu)
-            wandb.log({"total_loss": loss_cpu})
-            wandb.log({"dist_loss": dist_loss.item()})
-            wandb.log({"diffusion_loss": diffusion_loss.item()})
+            wandb.log({"epoch": epoch, "total_loss": loss_cpu})
+            wandb.log({"epoch": epoch, "dist_loss": dist_loss.item()})
+            wandb.log({"epoch": epoch, "diffusion_loss": diffusion_loss.item()})
 
 
             if i % print_log_freq == 0:
@@ -729,7 +731,9 @@ def train_nomad(
                         print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
 
                 if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-                    wandb.log(data_log, commit=True)
+                    wandb_data_log = {"epoch": epoch}
+                    wandb_data_log.update(data_log)
+                    wandb.log(wandb_data_log, commit=True)
 
             if image_log_freq != 0 and i % image_log_freq == 0:
                 visualize_diffusion_action_distribution(
@@ -904,9 +908,9 @@ def evaluate_nomad(
             loss_cpu = rand_mask_loss.item()
             tepoch.set_postfix(loss=loss_cpu)
 
-            wandb.log({"diffusion_eval_loss (random masking)": rand_mask_loss})
-            wandb.log({"diffusion_eval_loss (no masking)": no_mask_loss})
-            wandb.log({"diffusion_eval_loss (goal masking)": goal_mask_loss})
+            wandb.log({"epoch": epoch, "diffusion_eval_loss (random masking)": rand_mask_loss})
+            wandb.log({"epoch": epoch, "diffusion_eval_loss (no masking)": no_mask_loss})
+            wandb.log({"epoch": epoch, "diffusion_eval_loss (goal masking)": goal_mask_loss})
 
             if i % print_log_freq == 0 and print_log_freq != 0:
                 losses = _compute_losses_nomad(
@@ -932,7 +936,9 @@ def evaluate_nomad(
                         print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
 
                 if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-                    wandb.log(data_log, commit=True)
+                    wandb_data_log = {"epoch": epoch}
+                    wandb_data_log.update(data_log)
+                    wandb.log(wandb_data_log, commit=True)
 
             if image_log_freq != 0 and i % image_log_freq == 0:
                 visualize_diffusion_action_distribution(
@@ -1206,6 +1212,6 @@ def visualize_diffusion_action_distribution(
         wandb_list.append(wandb.Image(save_path))
         plt.close(fig)
     if len(wandb_list) > 0 and use_wandb:
-        wandb.log({f"{eval_type}_action_samples": wandb_list}, commit=False)
+        wandb.log({"epoch": epoch, f"{eval_type}_action_samples": wandb_list}, commit=False)
 
 

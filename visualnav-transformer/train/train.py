@@ -421,6 +421,8 @@ if __name__ == "__main__":
             settings=wandb.Settings(start_method="fork"),
             entity="coisinic243-beijing-university-of-technology", # TODO: change this to your wandb entity
         )
+        wandb.define_metric("epoch")
+        wandb.define_metric("*", step_metric="epoch")
         wandb.save(args.config, policy="now")  # save the config file
         wandb.run.name = config["run_name"]
         # update the wandb args with the training configurations

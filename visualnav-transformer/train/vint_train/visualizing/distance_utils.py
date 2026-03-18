@@ -79,7 +79,7 @@ def visualize_dist_pred(
         if use_wandb:
             wandb_list.append(wandb.Image(save_path))
     if use_wandb:
-        wandb.log({f"{eval_type}_dist_prediction": wandb_list}, commit=False)
+        wandb.log({"epoch": epoch, f"{eval_type}_dist_prediction": wandb_list}, commit=False)
 
 
 def visualize_dist_pairwise_pred(
@@ -167,7 +167,7 @@ def visualize_dist_pairwise_pred(
         if use_wandb:
             wandb_list.append(wandb.Image(save_path))
     if use_wandb:
-        wandb.log({f"{eval_type}_pairwise_classification": wandb_list}, commit=False)
+        wandb.log({"epoch": epoch, f"{eval_type}_pairwise_classification": wandb_list}, commit=False)
 
 
 def display_distance_pred(

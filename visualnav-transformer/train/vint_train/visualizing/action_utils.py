@@ -109,7 +109,7 @@ def visualize_traj_pred(
         if use_wandb:
             wandb_list.append(wandb.Image(save_path))
     if use_wandb:
-        wandb.log({f"{eval_type}_action_prediction": wandb_list}, commit=False)
+        wandb.log({"epoch": epoch, f"{eval_type}_action_prediction": wandb_list}, commit=False)
 
 
 def compare_waypoints_pred_to_label(

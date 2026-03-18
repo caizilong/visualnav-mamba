@@ -4,7 +4,7 @@ run_name: nomad_mamba
 # ---------------- 训练设置 ----------------
 use_wandb: True                           # 是否启用 wandb
 train: True
-batch_size: 256
+batch_size: 128
 epochs: 100
 gpu_ids: [0]
 num_workers: 12
@@ -63,7 +63,7 @@ normalize: True
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal
-context_size: 0
+context_size: 3
 alpha: 1e-4                               # 与原 NoMaD 相同：距离损失权重很小
 
 # ---------------- 距离 / 动作 标签范围 ----------------
@@ -82,9 +82,9 @@ learn_angle: False
 image_size: [96, 96]                      # [宽, 高]，必须能被 patch_size 整除，96/16=6 ✓
 datasets:
   go_stanford:
-    data_folder: /workspace/datasets/go_stanford0
-    train: vint_train/data/data_splits/go_stanford0/train/
-    test: vint_train/data/data_splits/go_stanford0/test/
+    data_folder: /workspace/datasets/go_stanford
+    train: vint_train/data/data_splits/go_stanford/train/
+    test: vint_train/data/data_splits/go_stanford/test/
     end_slack: 0 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
     goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
     negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略
@@ -134,10 +134,10 @@ datasets:
 
 # ---------------- 日志与评估配置 ----------------
 print_log_freq: 100
-image_log_freq: 10000
+image_log_freq: 0                      # 关闭图像上传（最省流量）
 num_images_log: 8
 pairwise_test_freq: 0
 eval_fraction: 0.25
-wandb_log_freq: 50                     # 每 50 个 batch 上传一次，降低 wandb 同步频率
+wandb_log_freq: 500                    # 每 500 个 batch 上传一次标量日志
 eval_freq: 1
 
