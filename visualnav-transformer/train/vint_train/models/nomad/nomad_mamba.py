@@ -189,17 +189,26 @@ class NoMaD_Mamba(nn.Module):
             (self.context_size + 1, -1, self.obs_encoding_size)
         )
         obs_encoding = torch.transpose(obs_encoding, 0, 1)  # [B, context_size+1, C]
-        tokens = torch.cat((obs_encoding, goal_encoding), dim=1)  # [B, context_size+2, C]
 
-        # ------- 3) 可选 goal mask（只在 pooling 时使用） -------
+        # ------- 3) 处理 goal mask -------
+        # 与 Transformer 不同，Mamba 没有原生的 padding mask 机制
+        # 但由于 Mamba 是因果模型，goal token 在序列末尾，不会影响前面观测 token 的计算
+        # 为了更好地模拟 Transformer 的 mask 行为，当 goal_mask=1 时将 goal_encoding 置零
+        # 这样 goal token 对最终 pooling 的贡献最小化
         if goal_mask is not None:
             no_goal_mask = goal_mask.long()  # 0 or 1
+            # 将 goal_mask 扩展为 [B, 1, C] 形状，用于逐元素乘法
+            goal_mask_expand = goal_mask.float().unsqueeze(1).unsqueeze(2)  # [B, 1, 1]
+            # 当 goal_mask=1 时，将 goal_encoding 置零；goal_mask=0 时保持不变
+            goal_encoding = goal_encoding * (1 - goal_mask_expand)
             # all_masks 已注册为 buffer，自动与模型同设备
             src_key_padding_mask = torch.index_select(
                 self.all_masks, 0, no_goal_mask
             )  # [B, seq_len]
         else:
             src_key_padding_mask = None
+
+        tokens = torch.cat((obs_encoding, goal_encoding), dim=1)  # [B, context_size+2, C]
 
         # ------- 4) 位置编码 + Mamba2 序列建模 -------
         x = tokens

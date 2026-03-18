@@ -273,16 +273,6 @@ def train_eval_loop_nomad(
             "lr": optimizer.param_groups[0]["lr"],
         }, commit=False)
 
-        if lr_scheduler is not None:
-            lr_scheduler.step()
-
-        # log average eval loss
-        wandb.log({}, commit=False)
-
-        wandb.log({
-            "lr": optimizer.param_groups[0]["lr"],
-        }, commit=False)
-
         
     # Flush the last set of eval logs
     wandb.log({})
