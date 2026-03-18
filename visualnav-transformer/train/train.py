@@ -186,6 +186,8 @@ def main(config):
         elif config["vision_encoder"] == "nomad_mamba":
             # 使用 Mamba2 作为序列建模模块的视觉编码器
             # 支持 timm 库中的多种视觉编码器：EfficientNet, ResNet, ViT, DINOv2, ConvNeXt 等
+            # 配置中 image_size 是 [宽, 高]，但 timm 需要 (高, 宽)
+            img_size_hw = (config["image_size"][1], config["image_size"][0])
             vision_encoder = NoMaD_Mamba(
                 context_size=config["context_size"],
                 obs_encoder=config.get("obs_encoder", "efficientnet-b0"),
@@ -195,6 +197,7 @@ def main(config):
                 mha_num_attention_layers=config["mha_num_attention_layers"],
                 mha_ff_dim_factor=config["mha_ff_dim_factor"],
                 mamba_cfg=MambaConfig.from_dict(config),
+                img_size=img_size_hw,  # 传递图像尺寸给 ViT 类模型
             )
             # 注：_create_timm_encoder 内部已调用 replace_bn_with_gn，无需重复调用
         elif config["vision_encoder"] == "vib": 

@@ -23,6 +23,7 @@ def _create_timm_encoder(
     in_chans: int = 3,
     pretrained: bool = True,
     use_gn: bool = True,
+    img_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[nn.Module, int]:
     """
     使用 timm 创建视觉编码器。
@@ -39,6 +40,7 @@ def _create_timm_encoder(
         in_chans: 输入通道数（3 为 RGB，6 为拼接图像）
         pretrained: 是否使用预训练权重
         use_gn: 是否将 BatchNorm 替换为 GroupNorm（对小 batch size 更稳定）
+        img_size: 输入图像尺寸 (H, W)，用于 ViT 类模型调整 patch embedding
     
     Returns:
         encoder: 视觉编码器模型
@@ -47,13 +49,26 @@ def _create_timm_encoder(
     # 标准化模型名称
     model_name = _normalize_model_name(model_name)
     
+    # 检查是否为 ViT 类模型（需要特殊处理图像尺寸）
+    is_vit_model = any(k in model_name.lower() for k in ['vit', 'dino', 'deit', 'beit', 'eva', 'swin'])
+    
+    # 构建创建参数
+    create_kwargs = {
+        'pretrained': pretrained,
+        'in_chans': in_chans,
+        'num_classes': 0,  # 移除分类头，只保留特征提取部分
+    }
+    
+    # 对于 ViT 类模型，需要处理图像尺寸
+    if is_vit_model:
+        if img_size is not None:
+            # 指定输入图像尺寸，timm 会自动调整 patch embedding
+            create_kwargs['img_size'] = img_size
+        # 启用动态图像尺寸支持（允许输入尺寸与预训练不同）
+        create_kwargs['dynamic_img_size'] = True
+    
     # 创建 timm 模型
-    encoder = timm.create_model(
-        model_name,
-        pretrained=pretrained,
-        in_chans=in_chans,
-        num_classes=0,  # 移除分类头，只保留特征提取部分
-    )
+    encoder = timm.create_model(model_name, **create_kwargs)
     
     # 可选：将 BatchNorm 替换为 GroupNorm
     if use_gn:
@@ -117,12 +132,14 @@ class NoMaD_Mamba(nn.Module):
         mha_num_attention_layers: Optional[int] = 2,  # 对应为 Mamba 层数
         mha_ff_dim_factor: Optional[int] = 4,         # 未使用，仅为兼容
         mamba_cfg: Optional["MambaConfig"] = None,
+        img_size: Optional[Tuple[int, int]] = None,   # 新增：输入图像尺寸 (H, W)，用于 ViT 类模型
     ) -> None:
         super().__init__()
 
         self.obs_encoding_size = obs_encoding_size
         self.goal_encoding_size = obs_encoding_size
         self.context_size = context_size
+        self.img_size = img_size
         
         # 如果未指定 goal_encoder，则使用与 obs_encoder 相同的类型
         if goal_encoder is None:
@@ -134,6 +151,7 @@ class NoMaD_Mamba(nn.Module):
             in_chans=3,
             pretrained=True,
             use_gn=True,
+            img_size=img_size,
         )
         self.obs_encoder_type = _normalize_model_name(obs_encoder)
 
@@ -143,6 +161,7 @@ class NoMaD_Mamba(nn.Module):
             in_chans=6,  # 当前观测(3) + 目标图像(3) 拼接
             pretrained=True,
             use_gn=True,
+            img_size=img_size,
         )
 
         # 若 EfficientNet 输出维度与期望的 encoding_size 不一致，则用线性层压缩到统一维度

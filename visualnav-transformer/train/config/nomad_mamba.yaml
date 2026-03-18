@@ -30,10 +30,11 @@ encoding_size: 256                        # 与 NoMaD_Mamba 输出维度保持�
 #   - EfficientNet: efficientnet-b0, efficientnet-b1, ...
 #   - ResNet: resnet18, resnet50, ...
 #   - ViT: vit_tiny_patch16_224, vit_small_patch16_224, ...
-#   - DINOv2: vit_small_patch14_dinov2, vit_base_patch14_dinov2, ...
+#   - DINOv2: vit_small_patch14_dinov2 (patch=14, 图像尺寸需能被14整除)
+#   - DINOv3: vit_small_patch16_dinov3 (patch=16, 推荐)
 #   - ConvNeXt: convnext_tiny, convnext_small, ...
-obs_encoder: efficientnet-b0              # 观测编码器
-# goal_encoder: efficientnet-b0           # 目标编码器（可选，默认与 obs_encoder 相同）
+obs_encoder: vit_small_patch16_dinov3              # 观测编码器（DINOv3, patch=16）
+goal_encoder: vit_small_patch16_dinov3           # 目标编码器（可选，默认与 obs_encoder 相同）
 attn_unet: False
 cond_predict_scale: False
 mha_num_attention_heads: 4                # 这里用于控制 Mamba 层数/配置
@@ -78,7 +79,7 @@ len_traj_pred: 8
 learn_angle: False
 
 # ---------------- 数据集设置 ----------------
-image_size: [96, 96]                      # [宽, 高]，NoMaD 使用方形图像
+image_size: [96, 96]                      # [宽, 高]，必须能被 patch_size 整除，96/16=6 ✓
 datasets:
   go_stanford:
     data_folder: /workspace/datasets/go_stanford0
