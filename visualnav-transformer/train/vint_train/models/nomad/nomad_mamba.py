@@ -10,21 +10,108 @@ from .nomad_vint import replace_bn_with_gn
 from .mamba2 import Mamba2, MambaConfig
 
 
+def _normalize_model_name(model_name: str) -> str:
+    """
+    将模型名称标准化为 timm 格式。
+    例如: 'efficientnet-b0' -> 'efficientnet_b0'
+    """
+    return model_name.replace("-", "_")
+
+
+def _create_timm_encoder(
+    model_name: str,
+    in_chans: int = 3,
+    pretrained: bool = True,
+    use_gn: bool = True,
+) -> Tuple[nn.Module, int]:
+    """
+    使用 timm 创建视觉编码器。
+    
+    支持的模型类型包括但不限于：
+    - EfficientNet 系列: efficientnet_b0, efficientnet_b1, ...
+    - ResNet 系列: resnet18, resnet50, ...
+    - ViT 系列: vit_tiny_patch16_224, vit_small_patch16_224, ...
+    - DINOv2 系列: vit_small_patch14_dinov2, vit_base_patch14_dinov2, ...
+    - ConvNeXt 系列: convnext_tiny, convnext_small, ...
+    
+    Args:
+        model_name: timm 模型名称
+        in_chans: 输入通道数（3 为 RGB，6 为拼接图像）
+        pretrained: 是否使用预训练权重
+        use_gn: 是否将 BatchNorm 替换为 GroupNorm（对小 batch size 更稳定）
+    
+    Returns:
+        encoder: 视觉编码器模型
+        num_features: 输出特征维度
+    """
+    # 标准化模型名称
+    model_name = _normalize_model_name(model_name)
+    
+    # 创建 timm 模型
+    encoder = timm.create_model(
+        model_name,
+        pretrained=pretrained,
+        in_chans=in_chans,
+        num_classes=0,  # 移除分类头，只保留特征提取部分
+    )
+    
+    # 可选：将 BatchNorm 替换为 GroupNorm
+    if use_gn:
+        encoder = replace_bn_with_gn(encoder)
+    
+    num_features = encoder.num_features
+    return encoder, num_features
+
+
+def _extract_features(encoder: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """
+    从 timm 编码器中提取特征，统一处理不同模型的输出格式。
+    
+    不同模型的 forward_features 输出：
+    - CNN (EfficientNet, ResNet, ConvNeXt): [B, C, H, W]
+    - ViT (包括 DINOv2): [B, num_tokens, dim] 或 [B, dim]
+    
+    Returns:
+        features: [B, num_features] 的特征向量
+    """
+    feats = encoder.forward_features(x)
+    
+    if feats.ndim == 4:
+        # CNN 输出: [B, C, H, W] -> [B, C]
+        feats = F.adaptive_avg_pool2d(feats, (1, 1)).flatten(start_dim=1)
+    elif feats.ndim == 3:
+        # ViT 输出: [B, num_tokens, dim]
+        # 通常第一个 token 是 CLS token，或者做平均池化
+        # 这里使用平均池化以保持通用性
+        feats = feats.mean(dim=1)  # [B, dim]
+    # 如果 feats.ndim == 2，已经是 [B, dim] 格式，无需处理
+    
+    return feats
+
+
 class NoMaD_Mamba(nn.Module):
     """
     使用 Mamba2 代替 Transformer 的 NoMaD 视觉编码器版本。
 
     与原始 `NoMaD_ViNT` 的主要差别：
-    - EfficientNet 编码观测与目标的部分保持一致；
+    - 使用 timm 库加载视觉编码器，支持多种 backbone（EfficientNet, ViT, DINOv2 等）；
     - 将 `TransformerEncoder` 替换为若干层 Mamba2 block，用于对
       [context_tokens + goal_token] 这一短序列进行建模；
     - 其余接口（输入/输出张量形状）保持不变，方便直接替换 `vision_encoder`。
+    
+    支持的 obs_encoder 类型（通过 timm 库）：
+    - 'efficientnet-b0', 'efficientnet-b1', ...
+    - 'resnet18', 'resnet50', ...
+    - 'vit_tiny_patch16_224', 'vit_small_patch16_224', ...
+    - 'vit_small_patch14_dinov2', 'vit_base_patch14_dinov2', ...
+    - 'convnext_tiny', 'convnext_small', ...
     """
 
     def __init__(
         self,
         context_size: int = 5,
         obs_encoder: Optional[str] = "efficientnet-b0",
+        goal_encoder: Optional[str] = None,  # 新增：可单独指定 goal 编码器，默认与 obs_encoder 相同
         obs_encoding_size: Optional[int] = 512,
         mha_num_attention_heads: Optional[int] = 2,   # 保留接口但目前未使用
         mha_num_attention_layers: Optional[int] = 2,  # 对应为 Mamba 层数
@@ -36,31 +123,27 @@ class NoMaD_Mamba(nn.Module):
         self.obs_encoding_size = obs_encoding_size
         self.goal_encoding_size = obs_encoding_size
         self.context_size = context_size
+        
+        # 如果未指定 goal_encoder，则使用与 obs_encoder 相同的类型
+        if goal_encoder is None:
+            goal_encoder = obs_encoder
 
-        # -------- 观测编码器：对单帧 RGB 图像做特征提取（timm EfficientNet） --------
-        if obs_encoder.split("-")[0] == "efficientnet":
-            obs_model_name = obs_encoder.replace("-", "_")
-            self.obs_encoder = timm.create_model(
-                obs_model_name,
-                pretrained=True,
-                in_chans=3,
-                num_classes=0,
-            )
-            self.obs_encoder = replace_bn_with_gn(self.obs_encoder)
-            self.num_obs_features = self.obs_encoder.num_features
-            self.obs_encoder_type = "efficientnet"
-        else:
-            raise NotImplementedError(f"obs_encoder {obs_encoder} 尚未在 NoMaD_Mamba 中支持")
-
-        # -------- 目标编码器：对 “当前观测 + 目标” 拼接后的 6 通道图像编码 --------
-        self.goal_encoder = timm.create_model(
-            "efficientnet_b0",
+        # -------- 观测编码器：对单帧 RGB 图像做特征提取（timm） --------
+        self.obs_encoder, self.num_obs_features = _create_timm_encoder(
+            model_name=obs_encoder,
+            in_chans=3,
             pretrained=True,
-            in_chans=6,
-            num_classes=0,
+            use_gn=True,
         )
-        self.goal_encoder = replace_bn_with_gn(self.goal_encoder)
-        self.num_goal_features = self.goal_encoder.num_features
+        self.obs_encoder_type = _normalize_model_name(obs_encoder)
+
+        # -------- 目标编码器：对 "当前观测 + 目标" 拼接后的 6 通道图像编码 --------
+        self.goal_encoder, self.num_goal_features = _create_timm_encoder(
+            model_name=goal_encoder,
+            in_chans=6,  # 当前观测(3) + 目标图像(3) 拼接
+            pretrained=True,
+            use_gn=True,
+        )
 
         # 若 EfficientNet 输出维度与期望的 encoding_size 不一致，则用线性层压缩到统一维度
         if self.num_obs_features != self.obs_encoding_size:
@@ -148,10 +231,6 @@ class NoMaD_Mamba(nn.Module):
         device = obs_img.device
 
         # ------- 1) 目标编码 -------
-        goal_encoding = torch.zeros(
-            (obs_img.size(0), 1, self.goal_encoding_size), device=device
-        )
-
         goal_mask = None
         if input_goal_mask is not None:
             goal_mask = input_goal_mask.to(device)
@@ -160,11 +239,8 @@ class NoMaD_Mamba(nn.Module):
         obsgoal_img = torch.cat(
             [obs_img[:, 3 * self.context_size :, :, :], goal_img], dim=1
         )  # [B, 6, H, W]
-        obsgoal_feats = self.goal_encoder.forward_features(obsgoal_img)
-        if obsgoal_feats.ndim == 4:
-            obsgoal_encoding = F.adaptive_avg_pool2d(obsgoal_feats, (1, 1)).flatten(start_dim=1)
-        else:
-            obsgoal_encoding = obsgoal_feats
+        # 使用统一的特征提取函数，支持 CNN 和 ViT 等不同架构
+        obsgoal_encoding = _extract_features(self.goal_encoder, obsgoal_img)
         obsgoal_encoding = self.compress_goal_enc(obsgoal_encoding)
 
         if obsgoal_encoding.ndim == 2:
@@ -176,11 +252,8 @@ class NoMaD_Mamba(nn.Module):
         obs_split = torch.split(obs_img, 3, dim=1)  # context_size+1 张 [B, 3, H, W]
         obs_stack = torch.cat(obs_split, dim=0)     # [B*(context_size+1), 3, H, W]
 
-        obs_feats = self.obs_encoder.forward_features(obs_stack)
-        if obs_feats.ndim == 4:
-            obs_encoding = F.adaptive_avg_pool2d(obs_feats, (1, 1)).flatten(start_dim=1)
-        else:
-            obs_encoding = obs_feats
+        # 使用统一的特征提取函数
+        obs_encoding = _extract_features(self.obs_encoder, obs_stack)
         obs_encoding = self.compress_obs_enc(obs_encoding)
 
         # 形状恢复为 [B, context_size+1, C]，并拼接 goal token 得到序列

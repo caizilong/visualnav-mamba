@@ -185,16 +185,18 @@ def main(config):
             vision_encoder = replace_bn_with_gn(vision_encoder)
         elif config["vision_encoder"] == "nomad_mamba":
             # 使用 Mamba2 作为序列建模模块的视觉编码器
+            # 支持 timm 库中的多种视觉编码器：EfficientNet, ResNet, ViT, DINOv2, ConvNeXt 等
             vision_encoder = NoMaD_Mamba(
                 context_size=config["context_size"],
                 obs_encoder=config.get("obs_encoder", "efficientnet-b0"),
+                goal_encoder=config.get("goal_encoder", None),  # 可选，默认与 obs_encoder 相同
                 obs_encoding_size=config["encoding_size"],
                 mha_num_attention_heads=config["mha_num_attention_heads"],
                 mha_num_attention_layers=config["mha_num_attention_layers"],
                 mha_ff_dim_factor=config["mha_ff_dim_factor"],
                 mamba_cfg=MambaConfig.from_dict(config),
             )
-            vision_encoder = replace_bn_with_gn(vision_encoder) # 这个是干啥的
+            # 注：_create_timm_encoder 内部已调用 replace_bn_with_gn，无需重复调用
         elif config["vision_encoder"] == "vib": 
             vision_encoder = ViB(
                 obs_encoding_size=config["encoding_size"],

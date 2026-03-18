@@ -24,7 +24,16 @@ seed: 0
 model_type: nomad
 vision_encoder: nomad_mamba               # 关键：使用新的 Mamba 版视觉编码器
 encoding_size: 256                        # 与 NoMaD_Mamba 输出维度保持一致
-obs_encoder: efficientnet-b0
+
+# 视觉编码器配置（通过 timm 库支持多种 backbone）
+# 支持的模型类型：
+#   - EfficientNet: efficientnet-b0, efficientnet-b1, ...
+#   - ResNet: resnet18, resnet50, ...
+#   - ViT: vit_tiny_patch16_224, vit_small_patch16_224, ...
+#   - DINOv2: vit_small_patch14_dinov2, vit_base_patch14_dinov2, ...
+#   - ConvNeXt: convnext_tiny, convnext_small, ...
+obs_encoder: efficientnet-b0              # 观测编码器
+# goal_encoder: efficientnet-b0           # 目标编码器（可选，默认与 obs_encoder 相同）
 attn_unet: False
 cond_predict_scale: False
 mha_num_attention_heads: 4                # 这里用于控制 Mamba 层数/配置
