@@ -38,26 +38,24 @@ def visualize_traj_pred(
     num_images_preds: int = 8,
     use_wandb: bool = True,
     display: bool = False,
-    wandb_step: Optional[int] = None,
-    wandb_epoch: Optional[float] = None,
 ):
     """
-    将预测的轨迹与 GT 轨迹在 ego 坐标系下进行可视化对比（使用最后一个 batch）。
+    Compare predicted path with the gt path of waypoints using egocentric visualization. This visualization is for the last batch in the dataset.
 
     Args:
-        batch_obs_images: 观测图像 batch，shape [B, H, W, C]
-        batch_goal_images: 目标图像 batch，shape [B, H, W, C]
-        dataset_indices: 每条样本所属数据集在 data_config.yaml 中的索引
-        batch_goals: 局部坐标系下的目标位置 [B, 2]
-        batch_pred_waypoints: 预测轨迹 [B, T, 2/4] 或 [B, num_samples, T, 2/4]
-        batch_label_waypoints: GT 轨迹 [B, T, 2/4]
-        eval_type: 评估类型字符串（用于日志前缀）
-        normalized: 轨迹是否在训练时被归一化（若是，则这里会乘回 metric_waypoint_spacing）
-        save_folder: 保存图片的工程目录
-        epoch: 当前 epoch 编号
-        num_images_preds: 最多可视化多少个样本
-        use_wandb: 是否将图片上传到 wandb
-        display: 是否直接在窗口中展示（一般在训练中为 False）
+        batch_obs_images (np.ndarray): batch of observation images [batch_size, height, width, channels]
+        batch_goal_images (np.ndarray): batch of goal images [batch_size, height, width, channels]
+        dataset_names: indices corresponding to the dataset name
+        batch_goals (np.ndarray): batch of goal positions [batch_size, 2]
+        batch_pred_waypoints (np.ndarray): batch of predicted waypoints [batch_size, horizon, 4] or [batch_size, horizon, 2] or [batch_size, num_trajs_sampled horizon, {2 or 4}]
+        batch_label_waypoints (np.ndarray): batch of label waypoints [batch_size, T, 4] or [batch_size, horizon, 2]
+        eval_type (string): f"{data_type}_{eval_type}" (e.g. "recon_train", "gs_test", etc.)
+        normalized (bool): whether the waypoints are normalized
+        save_folder (str): folder to save the images. If None, will not save the images
+        epoch (int): current epoch number
+        num_images_preds (int): number of images to visualize
+        use_wandb (bool): whether to use wandb to log the images
+        display (bool): whether to display the images
     """
     visualize_path = None
     if save_folder is not None:
@@ -111,12 +109,7 @@ def visualize_traj_pred(
         if use_wandb:
             wandb_list.append(wandb.Image(save_path))
     if use_wandb:
-        log_dict = {f"{eval_type}_action_prediction": wandb_list}
-        if wandb_step is not None:
-            log_dict["epoch"] = wandb_epoch if wandb_epoch is not None else wandb_step
-            wandb.log(log_dict, step=int(wandb_step), commit=False)
-        else:
-            wandb.log(log_dict, commit=False)
+        wandb.log({f"{eval_type}_action_prediction": wandb_list}, commit=False)
 
 
 def compare_waypoints_pred_to_label(
@@ -130,20 +123,17 @@ def compare_waypoints_pred_to_label(
     display: Optional[bool] = False,
 ):
     """
-    对单个样本，生成一个包含 3 列的可视化图：
-    - 左：在平面上画出预测轨迹与 GT 轨迹
-    - 中：将轨迹投影到观测图像上（若有相机内参）
-    - 右：显示目标图像
+    Compare predicted path with the gt path of waypoints using egocentric visualization.
 
     Args:
-        obs_img: 当前观测的图像（PIL 或 numpy 格式）
-        goal_img: 目标图像
-        dataset_name: 在 data_config.yaml 中的数据集名称，如 "recon"
-        goal_pos: 目标在局部坐标下的位置
-        pred_waypoints: 预测轨迹（可以是多条采样轨迹或单条）
-        label_waypoints: GT 轨迹
-        save_path: 若不为 None，则保存到该路径
-        display: 是否在屏幕上显示（一般在离线调试时使用）
+        obs_img: image of the observation
+        goal_img: image of the goal
+        dataset_name: name of the dataset found in data_config.yaml (e.g. "recon")
+        goal_pos: goal position in the image
+        pred_waypoints: predicted waypoints in the image
+        label_waypoints: label waypoints in the image
+        save_path: path to save the figure
+        display: whether to display the figure
     """
 
     fig, ax = plt.subplots(1, 3)
@@ -195,12 +185,15 @@ def plot_trajs_and_points_on_image(
     point_colors: list = [RED, GREEN],
 ):
     """
-    在一张图像上画出轨迹与关键点。
-
-    若当前数据集在 data_config.yaml 中配置了相机内外参（camera_metrics），则会：
-    - 使用 `get_pos_pixels` 将局部坐标系下的轨迹点投影到像素坐标
-    - 在图像上绘制轨迹折线与关键点
-    若未配置内参，则仅简单调用 `imshow` 展示原图。
+    Plot trajectories and points on an image. If there is no configuration for the camera interinstics of the dataset, the image will be plotted as is.
+    Args:
+        ax: matplotlib axis
+        img: image to plot
+        dataset_name: name of the dataset found in data_config.yaml (e.g. "recon")
+        list_trajs: list of trajectories, each trajectory is a numpy array of shape (horizon, 2) (if there is no yaw) or (horizon, 4) (if there is yaw)
+        list_points: list of points, each point is a numpy array of shape (2,)
+        traj_colors: list of colors for trajectories
+        point_colors: list of colors for points
     """
     assert len(list_trajs) <= len(traj_colors), "Not enough colors for trajectories"
     assert len(list_points) <= len(point_colors), "Not enough colors for points"
@@ -280,16 +273,19 @@ def plot_trajs_and_points(
     default_coloring: bool = True,
 ):
     """
-    在 2D 平面上绘制多条轨迹与若干点，支持可选的 yaw 向量可视化。
+    Plot trajectories and points that could potentially have a yaw.
 
     Args:
         ax: matplotlib axis
-        list_trajs: 轨迹列表，每条为 (T, 2) 或 (T, 4)（后两维为 yaw 的 sin/cos 或角度）
-        list_points: 关键点列表，每个为 (2,)
-        traj_colors / point_colors: 颜色列表
-        traj_labels / point_labels: 图例标签
-        traj_alphas / point_alphas: 透明度
-        quiver_freq: 若轨迹包含 yaw，隔多少个点画一次箭头
+        list_trajs: list of trajectories, each trajectory is a numpy array of shape (horizon, 2) (if there is no yaw) or (horizon, 4) (if there is yaw)
+        list_points: list of points, each point is a numpy array of shape (2,)
+        traj_colors: list of colors for trajectories
+        point_colors: list of colors for points
+        traj_labels: list of labels for trajectories
+        point_labels: list of labels for points
+        traj_alphas: list of alphas for trajectories
+        point_alphas: list of alphas for points
+        quiver_freq: frequency of quiver plot (if the trajectory data includes the yaw of the robot)
     """
     assert (
         len(list_trajs) <= len(traj_colors) or default_coloring
@@ -389,16 +385,18 @@ def project_points(
     dist_coeffs: np.ndarray,
 ):
     """
-    使用给定相机参数，将 2D 地面坐标 (x, y) 投影到图像平面上的像素坐标 (u, v)。
+    Projects 3D coordinates onto a 2D image plane using the provided camera parameters.
 
     Args:
-        xy: (batch_size, horizon, 2) 的坐标序列
-        camera_height: 相机离地高度（米）
-        camera_x_offset: 相机在车体坐标中的 x 方向偏移（米）
-        camera_matrix: 3x3 相机内参矩阵
-        dist_coeffs: 镜头畸变系数
+        xy: array of shape (batch_size, horizon, 2) representing (x, y) coordinates
+        camera_height: height of the camera above the ground (in meters)
+        camera_x_offset: offset of the camera from the center of the car (in meters)
+        camera_matrix: 3x3 matrix representing the camera's intrinsic parameters
+        dist_coeffs: vector of distortion coefficients
+
+
     Returns:
-        uv: (batch_size, horizon, 2) 的像素坐标
+        uv: array of shape (batch_size, horizon, 2) representing (u, v) coordinates on the 2D image plane
     """
     batch_size, horizon, _ = xy.shape
 
@@ -429,10 +427,16 @@ def get_pos_pixels(
     clip: Optional[bool] = False,
 ):
     """
-    将局部 (x, y) 坐标投影到图像平面，并根据 clip 参数决定是否裁剪到图像边界。
+    Projects 3D coordinates onto a 2D image plane using the provided camera parameters.
+    Args:
+        points: array of shape (batch_size, horizon, 2) representing (x, y) coordinates
+        camera_height: height of the camera above the ground (in meters)
+        camera_x_offset: offset of the camera from the center of the car (in meters)
+        camera_matrix: 3x3 matrix representing the camera's intrinsic parameters
+        dist_coeffs: vector of distortion coefficients
 
-    - clip=True: 将所有点坐标裁剪到可视化图像范围内
-    - clip=False: 只保留落在图像内部的点
+    Returns:
+        pixels: array of shape (batch_size, horizon, 2) representing (u, v) coordinates on the 2D image plane
     """
     pixels = project_points(
         points[np.newaxis], camera_height, camera_x_offset, camera_matrix, dist_coeffs

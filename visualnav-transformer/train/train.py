@@ -45,16 +45,9 @@ from vint_train.training.train_eval_loop import (
 
 
 def main(config):
-    """
-    主训练函数：
-    - 根据配置构建数据集 / 模型 / 优化器
-    - 可选地从 checkpoint 恢复训练
-    - 调用统一的训练-评估循环
-    """
     assert config["distance"]["min_dist_cat"] < config["distance"]["max_dist_cat"]
     assert config["action"]["min_dist_cat"] < config["action"]["max_dist_cat"]
 
-    # ---------- 设备与随机种子 ----------
     if torch.cuda.is_available():
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         if "gpu_ids" not in config:
@@ -78,14 +71,13 @@ def main(config):
         torch.manual_seed(config["seed"])
         cudnn.deterministic = True
 
-    # 若输入尺寸固定，开启 benchmark 可以加速 cuDNN
     cudnn.benchmark = True  # good if input sizes don't vary
     transform = ([
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     transform = transforms.Compose(transform)
 
-    # ---------- 构建数据集与 DataLoader ----------
+    # Load the data
     train_dataset = []
     test_dataloaders = {}
 
@@ -95,7 +87,6 @@ def main(config):
     if "clip_goals" not in config:
         config["clip_goals"] = False
 
-    # 遍历配置中定义的多个数据集（可以来自不同机器人 / 环境）
     for dataset_name in config["datasets"]:
         data_config = config["datasets"][dataset_name]
         if "negative_mining" not in data_config:
@@ -107,7 +98,6 @@ def main(config):
         if "waypoint_spacing" not in data_config:
             data_config["waypoint_spacing"] = 1
 
-        # 同一个数据集下，同时构建 train / test 两种 split
         for data_split_type in ["train", "test"]:
             if data_split_type in data_config:
                     dataset = ViNT_Dataset(
@@ -138,7 +128,7 @@ def main(config):
                             test_dataloaders[dataset_type] = {}
                         test_dataloaders[dataset_type] = dataset
 
-    # 将所有训练 split 的 ViNT_Dataset 合并成一个大数据集
+    # combine all the datasets from different robots
     train_dataset = ConcatDataset(train_dataset)
 
     train_loader = DataLoader(
@@ -153,7 +143,6 @@ def main(config):
     if "eval_batch_size" not in config:
         config["eval_batch_size"] = config["batch_size"]
 
-    # 为每个测试数据集单独创建 DataLoader，方便按名称评估
     for dataset_type, dataset in test_dataloaders.items():
         test_dataloaders[dataset_type] = DataLoader(
             dataset,
@@ -163,7 +152,7 @@ def main(config):
             drop_last=False,
         )
 
-    # ---------- 根据配置创建模型 ----------
+    # Create the model
     if config["model_type"] == "gnm":
         model = GNM(
             config["context_size"],
@@ -205,6 +194,7 @@ def main(config):
                 mha_ff_dim_factor=config["mha_ff_dim_factor"],
                 mamba_cfg=MambaConfig.from_dict(config),
             )
+            vision_encoder = replace_bn_with_gn(vision_encoder) # 这个是干啥的
         elif config["vision_encoder"] == "vib": 
             vision_encoder = ViB(
                 obs_encoding_size=config["encoding_size"],
@@ -226,7 +216,7 @@ def main(config):
             vision_encoder = replace_bn_with_gn(vision_encoder)
         else: 
             raise ValueError(f"Vision encoder {config['vision_encoder']} not supported")
-            
+        
         # 条件一维 UNet，用于 diffusion policy 中预测 action 噪声
         noise_pred_net = ConditionalUnet1D(
                 input_dim=2,
@@ -242,7 +232,7 @@ def main(config):
             noise_pred_net=noise_pred_net,
             dist_pred_net=dist_pred_network,
         )
-
+    
         # Diffusion policy 中使用的 DDPM 调度器（只在 NoMaD 模型下需要）
         noise_scheduler = DDPMScheduler(
             num_train_timesteps=config["num_diffusion_iters"],
@@ -253,7 +243,6 @@ def main(config):
     else:
         raise ValueError(f"Model {config['model']} not supported")
 
-    # ---------- 可选的梯度裁剪（通过 hook 实现） ----------
     if config["clipping"]:
         print("Clipping gradients to", config["max_norm"])
         for p in model.parameters():
@@ -265,7 +254,6 @@ def main(config):
                 )
             )
 
-    # ---------- 优化器与学习率调度器 ----------
     lr = float(config["lr"])
     config["optimizer"] = config["optimizer"].lower()
     if config["optimizer"] == "adam":
@@ -305,7 +293,6 @@ def main(config):
         else:
             raise ValueError(f"Scheduler {config['scheduler']} not supported")
 
-        # 可选 warmup：先线性预热，再接入上面的 scheduler
         if config["warmup"]:
             print("Using warmup scheduler")
             scheduler = GradualWarmupScheduler(
@@ -315,7 +302,6 @@ def main(config):
                 after_scheduler=scheduler,
             )
 
-    # ---------- 从已有 run 中恢复模型与优化器 ----------
     current_epoch = 0
     if "load_run" in config:
         load_project_folder = os.path.join("logs", config["load_run"])
@@ -326,7 +312,7 @@ def main(config):
         if "epoch" in latest_checkpoint:
             current_epoch = latest_checkpoint["epoch"] + 1
 
-    # ---------- 多 GPU 训练（DataParallel） ----------
+    # Multi-GPU
     if len(config["gpu_ids"]) > 1:
         model = nn.DataParallel(model, device_ids=config["gpu_ids"])
     model = model.to(device)
@@ -403,7 +389,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # 先加载默认配置，再用用户提供的 config 覆盖
     with open("config/defaults.yaml", "r") as f:
         default_config = yaml.safe_load(f)
 
@@ -414,7 +399,6 @@ if __name__ == "__main__":
 
     config.update(user_config)
 
-    # 为当前 run 拼接时间戳，避免覆盖
     config["run_name"] += "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
     config["project_folder"] = os.path.join(
         "logs", config["project_name"], config["run_name"]
@@ -425,7 +409,6 @@ if __name__ == "__main__":
         ],  # should error if dir already exists to avoid overwriting and old project
     )
 
-    # ---------- 可选：初始化 wandb 日志 ----------
     if config["use_wandb"]:
         wandb.login()
         wandb.init(
@@ -435,9 +418,6 @@ if __name__ == "__main__":
         )
         wandb.save(args.config, policy="now")  # save the config file
         wandb.run.name = config["run_name"]
-        # 使用 epoch 作为横坐标（替代默认的 batch/step）
-        wandb.define_metric("epoch")
-        wandb.define_metric("*", step_metric="epoch")
         # update the wandb args with the training configurations
         if wandb.run:
             wandb.config.update(config)

@@ -117,7 +117,6 @@ def train_eval_loop(
 
             avg_total_test_loss.append(total_eval_loss)
 
-        # ---------- 保存 checkpoint（包含模型、优化器与 scheduler） ----------
         checkpoint = {
             "epoch": epoch,
             "model": model,
@@ -126,9 +125,8 @@ def train_eval_loop(
             "scheduler": scheduler
         }
         # log average eval loss
-        wandb.log({"epoch": epoch}, step=epoch, commit=False)
+        wandb.log({}, commit=False)
 
-        # 根据 scheduler 类型选择 step 接口
         if scheduler is not None:
             # scheduler calls based on the type of scheduler
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -136,17 +134,16 @@ def train_eval_loop(
             else:
                 scheduler.step()
         wandb.log({
-            "epoch": epoch,
             "avg_total_test_loss": np.mean(avg_total_test_loss),
             "lr": optimizer.param_groups[0]["lr"],
-        }, step=epoch, commit=False)
+        }, commit=False)
 
         numbered_path = os.path.join(project_folder, f"{epoch}.pth")
         torch.save(checkpoint, latest_path)
         torch.save(checkpoint, numbered_path)  # keep track of model at every epoch
 
     # Flush the last set of eval logs
-    wandb.log({}, step=epoch)
+    wandb.log({})
     print()
 
 def train_eval_loop_nomad(
@@ -273,24 +270,22 @@ def train_eval_loop_nomad(
                     eval_fraction=eval_fraction,
                 )
         wandb.log({
-            "epoch": epoch,
             "lr": optimizer.param_groups[0]["lr"],
-        }, step=epoch, commit=False)
+        }, commit=False)
 
         if lr_scheduler is not None:
             lr_scheduler.step()
 
         # log average eval loss
-        wandb.log({"epoch": epoch}, step=epoch, commit=False)
+        wandb.log({}, commit=False)
 
         wandb.log({
-            "epoch": epoch,
             "lr": optimizer.param_groups[0]["lr"],
-        }, step=epoch, commit=False)
+        }, commit=False)
 
         
     # Flush the last set of eval logs
-    wandb.log({"epoch": current_epoch + epochs - 1}, step=current_epoch + epochs - 1)
+    wandb.log({})
     print()
 
 def load_model(model, model_type, checkpoint: dict) -> None:

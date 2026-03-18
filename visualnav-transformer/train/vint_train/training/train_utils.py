@@ -1,14 +1,3 @@
-"""
-本文件包含所有与训练循环相关的工具函数，包括：
-- ViNT / GNM 的监督训练与评估（距离 + 轨迹回归）
-- NoMaD（diffusion policy）的训练与评估
-- 若干辅助函数（轨迹归一化 / 反归一化、从 diffused 输出还原轨迹、可视化等）
-
-建议阅读顺序：
-1. `_compute_losses`、`train`、`evaluate`：理解经典 ViNT / GNM 的 loss 与训练流程
-2. `_compute_losses_nomad`、`train_nomad`、`evaluate_nomad`、`model_output`：理解基于扩散模型的 NoMaD 训练与推理
-"""
-
 import wandb
 import os
 import numpy as np
@@ -35,16 +24,15 @@ from torchvision import transforms
 import torchvision.transforms.functional as TF
 import matplotlib.pyplot as plt
 
-# ------------------ 读取数据统计信息（用于 NoMaD 动作归一化） ------------------
+# LOAD DATA CONFIG
 with open(os.path.join(os.path.dirname(__file__), "../data/data_config.yaml"), "r") as f:
     data_config = yaml.safe_load(f)
-# ACTION_STATS 中保存的是各数据集上的轨迹位移统计量（min/max），用于
-# 将真实动作映射到 [-1, 1] 以便扩散模型训练，再从 [-1, 1] 反归一化回实际尺度。
+# POPULATE ACTION STATS
 ACTION_STATS = {}
 for key in data_config['action_stats']:
     ACTION_STATS[key] = np.array(data_config['action_stats'][key])
 
-# ================== 经典 ViNT / GNM 训练相关 ==================
+# Train utils for ViNT and GNM
 def _compute_losses(
     dist_label: torch.Tensor,
     action_label: torch.Tensor,
@@ -160,12 +148,9 @@ def _log_data(
                 print(f"(epoch {epoch}) {logger.full_name()} {logger.average()}")
 
     if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-        wandb.log({"epoch": epoch + i / num_batches, **data_log}, step=int(epoch * num_batches + i), commit=wandb_increment_step)
+        wandb.log(data_log, commit=wandb_increment_step)
 
-    # 定期对距离预测和轨迹预测做可视化（图像 + 2D 轨迹）
     if image_log_freq != 0 and i % image_log_freq == 0:
-        wandb_step = int(epoch * num_batches + i)
-        wandb_epoch = epoch + i / num_batches
         visualize_dist_pred(
             to_numpy(obs_image),
             to_numpy(goal_image),
@@ -176,8 +161,6 @@ def _log_data(
             epoch,
             num_images_log,
             use_wandb=use_wandb,
-            wandb_step=wandb_step,
-            wandb_epoch=wandb_epoch,
         )
         visualize_traj_pred(
             to_numpy(obs_image),
@@ -192,8 +175,6 @@ def _log_data(
             epoch,
             num_images_log,
             use_wandb=use_wandb,
-            wandb_step=wandb_step,
-            wandb_epoch=wandb_epoch,
         )
 
 
@@ -290,6 +271,7 @@ def train(
         obs_image = torch.cat(obs_images, dim=1)
 
         viz_goal_image = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE)
+        
         goal_image = transform(goal_image).to(device)
         # -------- 2) 前向传播与损失计算 --------
         model_outputs = model(obs_image, goal_image)
@@ -299,6 +281,7 @@ def train(
         action_mask = action_mask.to(device)
 
         optimizer.zero_grad()
+      
         dist_pred, action_pred = model_outputs
 
         losses = _compute_losses(
@@ -313,7 +296,6 @@ def train(
 
         losses["total_loss"].backward()
         optimizer.step()
-
         # 将本 batch 的标量 loss 值推入 logger 中，用于后续滑动平均与可视化
         for key, value in losses.items():
             if key in loggers:
@@ -483,7 +465,8 @@ def evaluate(
     return dist_loss_logger.average(), action_loss_logger.average(), total_loss_logger.average()
 
 
-# ================== NoMaD / Diffusion Policy 训练相关 ==================
+# Train utils for NOMAD
+
 def _compute_losses_nomad(
     ema_model,
     noise_scheduler,
@@ -660,13 +643,12 @@ def train_nomad(
 
             B = actions.shape[0]
 
-            # Generate random goal mask：对部分样本遮住目标，使模型学到“缺失目标”的情况
+            # Generate random goal mask
             goal_mask = (torch.rand((B,)) < goal_mask_prob).long().to(device)
             obsgoal_cond = model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=goal_mask)
             
             # Get distance label
             distance = distance.float().to(device)
-
             # 将绝对动作序列转成相邻 step 之间的增量，再根据数据集统计量归一化到 [-1, 1]
             deltas = get_delta(actions)
             ndeltas = normalize_data(deltas, ACTION_STATS)
@@ -715,16 +697,12 @@ def train_nomad(
             # 同步更新 EMA 模型，用于评估与可视化
             ema_model.step(model)
 
-            # 记录标量指标到 tqdm 和 wandb（按 wandb_log_freq 降低上传频率）
+            # Logging
             loss_cpu = loss.item()
             tepoch.set_postfix(loss=loss_cpu)
-            if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-                wandb.log({
-                    "epoch": epoch + i / num_batches,
-                    "total_loss": loss_cpu,
-                    "dist_loss": dist_loss.item(),
-                    "diffusion_loss": diffusion_loss.item(),
-                }, step=int(epoch * num_batches + i))
+            wandb.log({"total_loss": loss_cpu})
+            wandb.log({"dist_loss": dist_loss.item()})
+            wandb.log({"diffusion_loss": diffusion_loss.item()})
 
 
             if i % print_log_freq == 0:
@@ -751,9 +729,8 @@ def train_nomad(
                         print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
 
                 if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-                    wandb.log({"epoch": epoch + i / num_batches, **data_log}, step=int(epoch * num_batches + i), commit=True)
+                    wandb.log(data_log, commit=True)
 
-            # 定期对扩散采样得到的 action 分布进行可视化
             if image_log_freq != 0 and i % image_log_freq == 0:
                 visualize_diffusion_action_distribution(
                     ema_model.averaged_model,
@@ -772,8 +749,6 @@ def train_nomad(
                     num_images_log,
                     30,
                     use_wandb,
-                    wandb_step=int(epoch * num_batches + i),
-                    wandb_epoch=epoch + i / num_batches,
                 )
 
 
@@ -795,14 +770,24 @@ def evaluate_nomad(
     use_wandb: bool = True,
 ):
     """
-    在评估集上评估 NoMaD 模型（使用 EMA 权重）。
+    Evaluate the model on the given evaluation dataset.
 
-    这里主要做两件事：
-    1. 比较在三种不同 goal mask 设置下的扩散重建误差
-       - 随机 mask：rand_goal_mask
-       - 无 mask：no_mask（同时看到观测和目标）
-       - 全 mask：goal_mask（只看目标）
-    2. 调用 `_compute_losses_nomad` 计算距离和动作相关指标，并用 Logger 做滑动平均。
+    Args:
+        eval_type (string): f"{data_type}_{eval_type}" (e.g. "recon_train", "gs_test", etc.)
+        ema_model (nn.Module): exponential moving average version of model to evaluate
+        dataloader (DataLoader): dataloader for eval
+        transform (transforms): transform to apply to images
+        device (torch.device): device to use for evaluation
+        noise_scheduler: noise scheduler to evaluate with 
+        project_folder (string): path to project folder
+        epoch (int): current epoch
+        print_log_freq (int): how often to print logs 
+        wandb_log_freq (int): how often to log to wandb
+        image_log_freq (int): how often to log images
+        alpha (float): weight for action loss
+        num_images_log (int): number of images to log
+        eval_fraction (float): fraction of data to use for evaluation
+        use_wandb (bool): whether to use wandb for logging
     """
     goal_mask_prob = torch.clip(torch.tensor(goal_mask_prob), 0, 1)
     ema_model = ema_model.averaged_model
@@ -853,7 +838,6 @@ def evaluate_nomad(
                 action_mask,
             ) = data
             
-            # 与 train_nomad 中相同的图像预处理逻辑
             obs_images = torch.split(obs_image, 3, dim=1)
             batch_viz_obs_images = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE[::-1])
             batch_viz_goal_images = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE[::-1])
@@ -864,7 +848,7 @@ def evaluate_nomad(
 
             B = actions.shape[0]
 
-            # 三种不同的 mask 配置，用于分析“目标可见性”对扩散误差的影响
+            # Generate random goal mask
             rand_goal_mask = (torch.rand((B,)) < goal_mask_prob).long().to(device)
             goal_mask = torch.ones_like(rand_goal_mask).long().to(device)
             no_mask = torch.zeros_like(rand_goal_mask).long().to(device)
@@ -916,16 +900,13 @@ def evaluate_nomad(
             # L2 loss
             goal_mask_loss = nn.functional.mse_loss(goal_mask_noise_pred, noise)
             
-            # 记录三种不同 mask 设置下的误差
+            # Logging
             loss_cpu = rand_mask_loss.item()
             tepoch.set_postfix(loss=loss_cpu)
 
-            wandb.log({
-                "epoch": epoch + i / num_batches,
-                "diffusion_eval_loss (random masking)": rand_mask_loss,
-                "diffusion_eval_loss (no masking)": no_mask_loss,
-                "diffusion_eval_loss (goal masking)": goal_mask_loss,
-            }, step=int(epoch * num_batches + i))
+            wandb.log({"diffusion_eval_loss (random masking)": rand_mask_loss})
+            wandb.log({"diffusion_eval_loss (no masking)": no_mask_loss})
+            wandb.log({"diffusion_eval_loss (goal masking)": goal_mask_loss})
 
             if i % print_log_freq == 0 and print_log_freq != 0:
                 losses = _compute_losses_nomad(
@@ -951,9 +932,8 @@ def evaluate_nomad(
                         print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
 
                 if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-                    wandb.log({"epoch": epoch + i / num_batches, **data_log}, step=int(epoch * num_batches + i), commit=True)
+                    wandb.log(data_log, commit=True)
 
-            # 定期可视化扩散采样得到的 action 分布
             if image_log_freq != 0 and i % image_log_freq == 0:
                 visualize_diffusion_action_distribution(
                     ema_model,
@@ -972,13 +952,10 @@ def evaluate_nomad(
                     num_images_log,
                     30,
                     use_wandb,
-                    wandb_step=int(epoch * num_batches + i),
-                    wandb_epoch=epoch + i / num_batches,
                 )
 
 
-# ------------------ 轨迹归一化 / 反归一化相关工具 ------------------
-
+# normalize data
 def get_data_stats(data):
     data = data.reshape(-1,data.shape[-1])
     stats = {
@@ -1000,22 +977,14 @@ def unnormalize_data(ndata, stats):
     return data
 
 def get_delta(actions):
-    # 先在最前面补一帧全 0，再做相邻差分，得到每一步的 (dx, dy) 增量。
+    # append zeros to first action
     ex_actions = np.concatenate([np.zeros((actions.shape[0],1,actions.shape[-1])), actions], axis=1)
     delta = ex_actions[:,1:] - ex_actions[:,:-1]
     return delta
 
 def get_action(diffusion_output, action_stats=ACTION_STATS):
-    """
-    将扩散模型输出的“增量序列”还原成绝对轨迹。
-
-    Args:
-        diffusion_output: 形状约为 [B, T, 2] 的归一化位移序列（在实际代码中先做 reshape）
-        action_stats: 归一化用到的统计量（min / max）
-
-    Returns:
-        actions: shape [B, T, 2]，为在局部坐标系下的累积位移轨迹。
-    """
+    # diffusion_output: (B, 2*T+1, 1)
+    # return: (B, T-1)
     device = diffusion_output.device
     ndeltas = diffusion_output
     ndeltas = ndeltas.reshape(ndeltas.shape[0], -1, 2)
@@ -1035,16 +1004,6 @@ def model_output(
     num_samples: int,
     device: torch.device,
 ):
-    """
-    给定一批观测 / 目标图像，利用扩散模型采样出：
-    - uc_actions：只看观测（目标被 mask）下的多次采样轨迹
-    - gc_actions：观测 + 目标都可见下的多次采样轨迹
-    - gc_distance：在“观测 + 目标可见”条件下预测的距离
-
-    这里分两次运行扩散过程：
-    1) 使用 obs_cond（只含观测信息）作为条件，得到 `uc_actions`
-    2) 使用 obsgoal_cond（观测 + 目标）作为条件，得到 `gc_actions` 和 `gc_distance`
-    """
     goal_mask = torch.ones((batch_goal_images.shape[0],)).long().to(device)
     obs_cond = model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=goal_mask)
     # obs_cond = obs_cond.flatten(start_dim=1)
@@ -1055,7 +1014,7 @@ def model_output(
     # obsgoal_cond = obsgoal_cond.flatten(start_dim=1)  
     obsgoal_cond = obsgoal_cond.repeat_interleave(num_samples, dim=0)
 
-    # 第一次扩散：只用 obs_cond 作为条件，得到“无目标信息”的动作分布
+    # initialize action from Gaussian noise
     noisy_diffusion_output = torch.randn(
         (len(obs_cond), pred_horizon, action_dim), device=device)
     diffusion_output = noisy_diffusion_output
@@ -1079,7 +1038,7 @@ def model_output(
 
     uc_actions = get_action(diffusion_output, ACTION_STATS)
 
-    # 第二次扩散：用 obsgoal_cond（带目标）作为条件，得到“含目标信息”的动作分布
+    # initialize action from Gaussian noise
     noisy_diffusion_output = torch.randn(
         (len(obs_cond), pred_horizon, action_dim), device=device)
     diffusion_output = noisy_diffusion_output
@@ -1127,10 +1086,8 @@ def visualize_diffusion_action_distribution(
     num_images_log: int,
     num_samples: int = 30,
     use_wandb: bool = True,
-    wandb_step: Optional[int] = None,
-    wandb_epoch: Optional[float] = None,
 ):
-    """从扩散探索模型中采样多条轨迹，并与 GT 轨迹对比进行可视化。"""
+    """Plot samples from the exploration model."""
 
     visualize_path = os.path.join(
         project_folder,
@@ -1249,9 +1206,6 @@ def visualize_diffusion_action_distribution(
         wandb_list.append(wandb.Image(save_path))
         plt.close(fig)
     if len(wandb_list) > 0 and use_wandb:
-        log_dict = {f"{eval_type}_action_samples": wandb_list}
-        step_val = wandb_step if wandb_step is not None else epoch
-        log_dict["epoch"] = wandb_epoch if wandb_epoch is not None else epoch
-        wandb.log(log_dict, step=int(step_val), commit=False)
+        wandb.log({f"{eval_type}_action_samples": wandb_list}, commit=False)
 
 

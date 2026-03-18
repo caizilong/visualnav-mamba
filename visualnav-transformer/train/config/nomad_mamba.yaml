@@ -1,5 +1,5 @@
-project_name: nomad                 # 新的 Mamba 版本 NoMaD 项目名
-run_name: nomad_mamba               # 实验名（训练时会拼接时间戳）
+project_name: nomad                 
+run_name: nomad_mamba               
 
 # ---------------- 训练设置 ----------------
 use_wandb: True                           # 是否启用 wandb
@@ -8,7 +8,7 @@ batch_size: 128
 epochs: 150
 gpu_ids: [0]
 num_workers: 12
-lr: 5e-5                                  
+lr: 5e-5
 optimizer: adamw
 clipping: False
 max_norm: 1.
@@ -33,6 +33,8 @@ mha_ff_dim_factor: 4
 down_dims: [64, 128, 256]
 
 # Mamba2 超参数（可选，不设置则使用 MambaConfig 默认值；对 encoding_size=256 短序列建议较小值）
+# 约束条件: (encoding_size * mamba_expand) % mamba_headdim == 0   #123
+# 当前配置: (256 * 2) % 64 = 0 ✓   #123
 mamba_d_state: 64
 mamba_d_conv: 4
 mamba_expand: 2
@@ -51,7 +53,7 @@ normalize: True
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal
-context_size: 5
+context_size: 3
 alpha: 1e-4                               # 与原 NoMaD 相同：距离损失权重很小
 
 # ---------------- 距离 / 动作 标签范围 ----------------
@@ -70,19 +72,19 @@ learn_angle: False
 image_size: [96, 96]                      # [宽, 高]，NoMaD 使用方形图像
 datasets:
   go_stanford:
-    data_folder: /workspace/datasets/go_stanford
-    train: vint_train/data/data_splits/go_stanford/train/
-    test: vint_train/data/data_splits/go_stanford/test/
+    data_folder: /workspace/datasets/go_stanford0
+    train: vint_train/data/data_splits/go_stanford0/train/
+    test: vint_train/data/data_splits/go_stanford0/test/
     end_slack: 0 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
     goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
     negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略
-  recon:
-    data_folder: /workspace/datasets/recon
-    train: vint_train/data/data_splits/recon/train/ # path to train folder with traj_names.txt
-    test: vint_train/data/data_splits/recon/test/ # path to test folder with traj_names.txt
-    end_slack: 3 # because many trajectories end in collisions
-    goals_per_obs: 1 # how many goals are sampled per observation
-    negative_mining: True # negative mining from the ViNG paper (Shah et al.)
+  # recon:
+  #   data_folder: /workspace/datasets/recon
+  #   train: vint_train/data/data_splits/recon/train/ # path to train folder with traj_names.txt
+  #   test: vint_train/data/data_splits/recon/test/ # path to test folder with traj_names.txt
+  #   end_slack: 3 # because many trajectories end in collisions
+  #   goals_per_obs: 1 # how many goals are sampled per observation
+  #   negative_mining: True # negative mining from the ViNG paper (Shah et al.)
   # recon:
   #   data_folder: /home/<username>/nomad_dataset/recon
   #   train: /home/<username>/data_splits/recon/train/

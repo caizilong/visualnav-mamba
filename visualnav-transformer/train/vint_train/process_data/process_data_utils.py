@@ -7,15 +7,13 @@ import cv2
 from typing import Any, Tuple, List, Dict
 import torchvision.transforms.functional as TF
 
-IMAGE_SIZE = (160, 120)          # 统一将原始图像 resize 到的尺寸 (宽, 高)
-IMAGE_ASPECT_RATIO = 4 / 3       # 训练阶段所有图像都会中心裁剪成 4:3 的宽高比
+IMAGE_SIZE = (160, 120)
+IMAGE_ASPECT_RATIO = 4 / 3
 
 
 def process_images(im_list: List, img_process_func) -> List:
     """
-    将 ROS topic 接收到的一串图像消息，批量转换为 PIL.Image 列表。
-
-    具体的消息 → PIL 转换逻辑由 img_process_func 决定，不同数据集可以传入不同函数。
+    Process image data from a topic that publishes ros images into a list of PIL images
     """
     images = []
     for img_msg in im_list:
@@ -26,10 +24,7 @@ def process_images(im_list: List, img_process_func) -> List:
 
 def process_tartan_img(msg) -> Image:
     """
-    将 `sensor_msgs/Image` 消息转换为 tartan_drive 数据集使用的 PIL 图像：
-    - 使用 ros_to_numpy 解码并归一化
-    - 转为 0~255 的 uint8，再从 (C, H, W) 转回 (H, W, C)
-    - 做 RGB→BGR 转换，再交给 PIL 生成图像
+    Process image data from a topic that publishes sensor_msgs/Image to a PIL image for the tartan_drive dataset
     """
     img = ros_to_numpy(msg, output_resolution=IMAGE_SIZE) * 255
     img = img.astype(np.uint8)
@@ -43,7 +38,7 @@ def process_tartan_img(msg) -> Image:
 
 def process_locobot_img(msg) -> Image:
     """
-    将 locobot 数据集上的 `sensor_msgs/Image` 直接 reshape 成 (H, W, C)，并转为 PIL 图像。
+    Process image data from a topic that publishes sensor_msgs/Image to a PIL image for the locobot dataset
     """
     img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
         msg.height, msg.width, -1)
@@ -53,10 +48,7 @@ def process_locobot_img(msg) -> Image:
 
 def process_scand_img(msg) -> Image:
     """
-    将 scand 数据集上的 `sensor_msgs/CompressedImage` 解码为 PIL 图像：
-    - 先用 PIL 打开压缩字节流
-    - 居中裁剪到 4:3 宽高比
-    - 再 resize 到统一的 IMAGE_SIZE
+    Process image data from a topic that publishes sensor_msgs/CompressedImage to a PIL image for the scand dataset
     """
     # convert sensor_msgs/CompressedImage to PIL image
     img = Image.open(io.BytesIO(msg.data))
@@ -89,10 +81,7 @@ def process_odom(
     ang_offset: float = 0.0,
 ) -> Dict[np.ndarray, np.ndarray]:
     """
-    将一系列里程计消息（通常是 `nav_msgs/Odometry`）统一转换为：
-        {"position": (N, 2), "yaw": (N,)}
-
-    具体的单条消息解码逻辑由 odom_process_func 决定。
+    Process odom data from a topic that publishes nav_msgs/Odometry into position and yaw
     """
     xys = []
     yaws = []
@@ -105,9 +94,7 @@ def process_odom(
 
 def nav_to_xy_yaw(odom_msg, ang_offset: float) -> Tuple[List[float], float]:
     """
-    将单条 `nav_msgs/Odometry` 解析为 2D 位置与 yaw：
-    - 从四元数中取出 yaw（绕 z 轴旋转），再加上外部提供的 ang_offset
-    - 仅返回平面位置 [x, y] 与 yaw（单位弧度）
+    Process odom data from a topic that publishes nav_msgs/Odometry into position
     """
 
     position = odom_msg.pose.pose.position
@@ -135,21 +122,19 @@ def get_images_and_odom(
     ang_offset: float = 0.0,
 ):
     """
-    从 rosbag 中同步采样图像与里程计数据，并转换为统一格式。
-
-    每隔 `1/rate` 秒，将当前缓存到的图像消息与 odom 消息配对一次。
+    Get image and odom data from a bag file
 
     Args:
-        bag (rosbag.Bag): bag 文件句柄
-        imtopics (list[str] or str): 候选图像 topic 名（会自动选择首个非空 topic）
-        odomtopics (list[str] or str): 候选里程计 topic 名
-        img_process_func (Any): 将原始 ROS 图像消息转换为 PIL.Image 的函数
-        odom_process_func (Any): 将原始 odom 消息转换为 (xy, yaw) 的函数
-        rate (float): 下采样频率（Hz）
-        ang_offset (float): 所有 yaw 上额外叠加的偏置（单位弧度）
+        bag (rosbag.Bag): bag file
+        imtopics (list[str] or str): topic name(s) for image data
+        odomtopics (list[str] or str): topic name(s) for odom data
+        img_process_func (Any): function to process image data
+        odom_process_func (Any): function to process odom data
+        rate (float, optional): rate to sample data. Defaults to 4.0.
+        ang_offset (float, optional): angle offset to add to odom data. Defaults to 0.0.
     Returns:
-        img_data (List[PIL.Image]): 同步后的图像序列
-        traj_data (Dict[str, np.ndarray]): {"position": (N,2), "yaw": (N,)} 的轨迹数据
+        img_data (list): list of PIL images
+        traj_data (list): list of odom data
     """
     # check if bag has both topics
     odomtopic = None
@@ -205,10 +190,10 @@ def is_backwards(
     pos1: np.ndarray, yaw1: float, pos2: np.ndarray, eps: float = 1e-5
 ) -> bool:
     """
-    根据两个连续位置点与前一时刻的航向，判断是否“在往后退”。
+    Check if the trajectory is going backwards given the position and yaw of two points
+    Args:
+        pos1: position of the first point
 
-    原理：计算 pos2 - pos1 在机器人前向方向 (cos(yaw1), sin(yaw1)) 上的投影，
-    若投影过小（< eps），则认为机器人速度在前向上的分量不够大，可视为倒车或停止。
     """
     dx, dy = pos2 - pos1
     return dx * np.cos(yaw1) + dy * np.sin(yaw1) < eps
@@ -222,15 +207,16 @@ def filter_backwards(
     end_slack: int = 0,
 ) -> Tuple[List[np.ndarray], List[int]]:
     """
-    将一条完整轨迹切分成若干“正向运动”片段（过滤掉倒退或静止段）。
-
+    Cut out non-positive velocity segments of the trajectory
     Args:
-        img_list: 与轨迹对齐的图像列表
-        traj_data: {"position": (T,2), "yaw": (T,)} 的轨迹数据
-        start_slack: 轨迹起始处忽略的若干点
-        end_slack: 轨迹末尾忽略的若干点
+        traj_type: type of trajectory to cut
+        img_list: list of images
+        traj_data: dictionary of position and yaw data
+        start_slack: number of points to ignore at the start of the trajectory
+        end_slack: number of points to ignore at the end of the trajectory
     Returns:
-        cut_trajs: List[Tuple[List[PIL.Image], Dict{"position","yaw"}]]，每个元素是一段子轨迹
+        cut_trajs: list of cut trajectories
+        start_times: list of start times of the cut trajectories
     """
     traj_pos = traj_data["position"]
     traj_yaws = traj_data["yaw"]
@@ -273,7 +259,8 @@ def quat_to_yaw(
     w: np.ndarray,
 ) -> np.ndarray:
     """
-    将四元数 (x, y, z, w) 转换为 yaw（绕 z 轴的旋转角，单位弧度，逆时针为正）。
+    Convert a batch quaternion into a yaw angle
+    yaw is rotation around z in radians (counterclockwise)
     """
     t3 = 2.0 * (w * z + x * y)
     t4 = 1.0 - 2.0 * (y * y + z * z)
@@ -285,15 +272,7 @@ def ros_to_numpy(
     msg, nchannels=3, empty_value=None, output_resolution=None, aggregate="none"
 ):
     """
-    将 ROS 图像消息转换为 numpy 数组（channels-first 形式）。
-
-    支持：
-        - 8bit 编码的 RGB 图像（uint8 → [0,1] 浮点数）
-        - 浮点编码的深度/其它多通道信息（float32）
-    可以选择：
-        - output_resolution: 输出分辨率
-        - aggregate: 将多通道合成为 big/little endian 整数值
-        - empty_value: 遇到无效值时用 99 分位数填充
+    Convert a ROS image message to a numpy array
     """
     if output_resolution is None:
         output_resolution = (msg.width, msg.height)

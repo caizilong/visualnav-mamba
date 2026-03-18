@@ -67,8 +67,11 @@ class MambaConfig:
             "mamba_d_conv": "d_conv",
             "mamba_expand": "expand",
             "mamba_headdim": "headdim",
+            "mamba_ngroups": "ngroups",     #123
             "mamba_chunk_size": "chunk_size",
             "mamba_use_mem_eff_path": "use_mem_eff_path",
+            "mamba_bias": "mamba_bias",     #123
+            "mamba_conv_bias": "mamba_conv_bias",       #123
         }
         for config_key, attr_name in mapping.items():
             if config_key in d:

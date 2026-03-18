@@ -19,13 +19,23 @@ def visualize_dist_pred(
     display: bool = False,
     rounding: int = 4,
     dist_error_threshold: float = 3.0,
-    wandb_step: Optional[int] = None,
-    wandb_epoch: Optional[float] = None,
 ):
     """
-    将“观测-目标对”的距离预测与标签可视化成图像（单样本两张图：Observation / Goal）。
+    Visualize the distance classification predictions and labels for an observation-goal image pair.
 
-    若预测误差超过 dist_error_threshold，则标题文字用红色，便于快速发现误差较大的样本。
+    Args:
+        batch_obs_images (np.ndarray): batch of observation images [batch_size, height, width, channels]
+        batch_goal_images (np.ndarray): batch of goal images [batch_size, height, width, channels]
+        batch_dist_preds (np.ndarray): batch of distance predictions [batch_size]
+        batch_dist_labels (np.ndarray): batch of distance labels [batch_size]
+        eval_type (string): {data_type}_{eval_type} (e.g. recon_train, gs_test, etc.)
+        epoch (int): current epoch number
+        num_images_preds (int): number of images to visualize
+        use_wandb (bool): whether to use wandb to log the images
+        save_folder (str): folder to save the images. If None, will not save the images
+        display (bool): whether to display the images
+        rounding (int): number of decimal places to round the distance predictions and labels
+        dist_error_threshold (float): distance error threshold for classifying the distance prediction as correct or incorrect (only used for visualization purposes)
     """
     visualize_path = os.path.join(
         save_folder,
@@ -69,12 +79,7 @@ def visualize_dist_pred(
         if use_wandb:
             wandb_list.append(wandb.Image(save_path))
     if use_wandb:
-        log_dict = {f"{eval_type}_dist_prediction": wandb_list}
-        if wandb_step is not None:
-            log_dict["epoch"] = wandb_epoch if wandb_epoch is not None else wandb_step
-            wandb.log(log_dict, step=int(wandb_step), commit=False)
-        else:
-            wandb.log(log_dict, commit=False)
+        wandb.log({f"{eval_type}_dist_prediction": wandb_list}, commit=False)
 
 
 def visualize_dist_pairwise_pred(
@@ -90,16 +95,27 @@ def visualize_dist_pairwise_pred(
     epoch: int,
     num_images_preds: int = 8,
     use_wandb: bool = True,
-    wandb_step: Optional[int] = None,
-    wandb_epoch: Optional[float] = None,
     display: bool = False,
     rounding: int = 4,
 ):
     """
-    针对“成对距离比较”任务的可视化：Observation + Close Goal + Far Goal。
+    Visualize the distance classification predictions and labels for an observation-goal image pair.
 
-    - 标题中会打印 close / far 的预测与标签
-    - 若模型未能满足 close_pred < far_pred，则用红色标记文本
+    Args:
+        batch_obs_images (np.ndarray): batch of observation images [batch_size, height, width, channels]
+        batch_close_images (np.ndarray): batch of close goal images [batch_size, height, width, channels]
+        batch_far_images (np.ndarray): batch of far goal images [batch_size, height, width, channels]
+        batch_close_preds (np.ndarray): batch of close predictions [batch_size]
+        batch_far_preds (np.ndarray): batch of far predictions [batch_size]
+        batch_close_labels (np.ndarray): batch of close labels [batch_size]
+        batch_far_labels (np.ndarray): batch of far labels [batch_size]
+        eval_type (string): {data_type}_{eval_type} (e.g. recon_train, gs_test, etc.)
+        save_folder (str): folder to save the images. If None, will not save the images
+        epoch (int): current epoch number
+        num_images_preds (int): number of images to visualize
+        use_wandb (bool): whether to use wandb to log the images
+        display (bool): whether to display the images
+        rounding (int): number of decimal places to round the distance predictions and labels
     """
     visualize_path = os.path.join(
         save_folder,
@@ -151,12 +167,7 @@ def visualize_dist_pairwise_pred(
         if use_wandb:
             wandb_list.append(wandb.Image(save_path))
     if use_wandb:
-        log_dict = {f"{eval_type}_pairwise_classification": wandb_list}
-        if wandb_step is not None:
-            log_dict["epoch"] = wandb_epoch if wandb_epoch is not None else wandb_step
-            wandb.log(log_dict, step=int(wandb_step), commit=False)
-        else:
-            wandb.log(log_dict, commit=False)
+        wandb.log({f"{eval_type}_pairwise_classification": wandb_list}, commit=False)
 
 
 def display_distance_pred(

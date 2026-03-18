@@ -97,6 +97,8 @@ class NoMaD_Mamba(nn.Module):
                 dt_max=self.mamba_cfg.dt_max,
                 dt_init_floor=self.mamba_cfg.dt_init_floor,
                 dt_limit=self.mamba_cfg.dt_limit,
+                bias=self.mamba_cfg.mamba_bias,     #123
+                conv_bias=self.mamba_cfg.mamba_conv_bias,       #123
                 chunk_size=self.mamba_cfg.chunk_size,
                 use_mem_eff_path=self.mamba_cfg.use_mem_eff_path,
             )
@@ -105,19 +107,27 @@ class NoMaD_Mamba(nn.Module):
         self.mamba_layers = nn.ModuleList(
             [_make_mamba_layer(self.obs_encoding_size) for _ in range(mha_num_attention_layers)]
         )
+        # Pre-LN：每层 Mamba 前做 LayerNorm，提升深层网络训练稳定性
+        self.mamba_norms = nn.ModuleList(
+            [nn.LayerNorm(self.obs_encoding_size) for _ in range(mha_num_attention_layers)]
+        )
 
-        # goal mask 相关，与 NoMaD_ViNT 保持一致
-        self.goal_mask = torch.zeros((1, self.context_size + 2), dtype=torch.bool)
-        self.goal_mask[:, -1] = True  # mask 掉最后一个 token（goal）
-        self.no_mask = torch.zeros((1, self.context_size + 2), dtype=torch.bool)
-        self.all_masks = torch.cat([self.no_mask, self.goal_mask], dim=0)
-        self.avg_pool_mask = torch.cat(
+        # goal mask 相关，与 NoMaD_ViNT 保持一致；注册为 buffer 随模型自动迁移设备
+        goal_mask = torch.zeros((1, self.context_size + 2), dtype=torch.bool)
+        goal_mask[:, -1] = True  # mask 掉最后一个 token（goal）
+        no_mask = torch.zeros((1, self.context_size + 2), dtype=torch.bool)
+        all_masks = torch.cat([no_mask, goal_mask], dim=0)
+        avg_pool_mask = torch.cat(
             [
-                1 - self.no_mask.float(),
-                (1 - self.goal_mask.float()) * ((self.context_size + 2) / (self.context_size + 1)),
+                1 - no_mask.float(),
+                (1 - goal_mask.float()) * ((self.context_size + 2) / (self.context_size + 1)),
             ],
             dim=0,
         )
+        self.register_buffer("goal_mask", goal_mask)
+        self.register_buffer("no_mask", no_mask)
+        self.register_buffer("all_masks", all_masks)
+        self.register_buffer("avg_pool_mask", avg_pool_mask)
 
     def forward(
         self,
@@ -127,7 +137,7 @@ class NoMaD_Mamba(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            obs_img: [B, 3 * context_size, H, W] 的上下文观测图像
+            obs_img: [B, 3 * (context_size+1), H, W] 的上下文观测图像（含当前帧）
             goal_img: [B, 3, H, W] 的目标图像
             input_goal_mask: [B]，取值 0 或 1，控制是否屏蔽 goal token
 
@@ -184,8 +194,9 @@ class NoMaD_Mamba(nn.Module):
         # ------- 3) 可选 goal mask（只在 pooling 时使用） -------
         if goal_mask is not None:
             no_goal_mask = goal_mask.long()  # 0 or 1
+            # all_masks 已注册为 buffer，自动与模型同设备
             src_key_padding_mask = torch.index_select(
-                self.all_masks.to(device), 0, no_goal_mask
+                self.all_masks, 0, no_goal_mask
             )  # [B, seq_len]
         else:
             src_key_padding_mask = None
@@ -195,16 +206,15 @@ class NoMaD_Mamba(nn.Module):
         if self.positional_encoding is not None:
             x = self.positional_encoding(x)
 
-        # 层间残差连接，改善梯度流动与训练稳定性（类似 Transformer 的 Pre-LN 结构）
-        for layer in self.mamba_layers:
-            x = x + layer(x)
+        # Pre-LN 残差：x = x + layer(LayerNorm(x))，先归一化再进 Mamba，梯度更稳定
+        for layer, norm in zip(self.mamba_layers, self.mamba_norms):
+            x = x + layer(norm(x))
 
         # ------- 5) 按 mask 做加权平均池化，得到最终 embedding -------
         if src_key_padding_mask is not None:
-            # src_key_padding_mask: True 表示被 mask 的位置
-            # avg_pool_mask 中预先编码了针对有无 goal 的归一化权重
+            # avg_pool_mask 已注册为 buffer，自动与模型同设备
             avg_mask = torch.index_select(
-                self.avg_pool_mask.to(device), 0, no_goal_mask
+                self.avg_pool_mask, 0, no_goal_mask
             ).unsqueeze(-1)  # [B, seq_len, 1]
             x = x * avg_mask
 

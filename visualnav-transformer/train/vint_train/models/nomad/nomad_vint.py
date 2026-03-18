@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from typing import List, Dict, Optional, Tuple, Callable
-import timm
+from efficientnet_pytorch import EfficientNet
 from vint_train.models.vint.self_attention import PositionalEncoding
 
 class NoMaD_ViNT(nn.Module):
@@ -30,28 +30,17 @@ class NoMaD_ViNT(nn.Module):
 
         # -------- 观测编码器：对单帧 RGB 图像做特征提取（timm EfficientNet） --------
         if obs_encoder.split("-")[0] == "efficientnet":
-            obs_model_name = obs_encoder.replace("-", "_")
-            self.obs_encoder = timm.create_model(
-                obs_model_name,
-                pretrained=True,
-                in_chans=3,
-                num_classes=0,
-            )
+            self.obs_encoder = EfficientNet.from_name(obs_encoder, in_channels=3) # context
             self.obs_encoder = replace_bn_with_gn(self.obs_encoder)
-            self.num_obs_features = self.obs_encoder.num_features
+            self.num_obs_features = self.obs_encoder._fc.in_features
             self.obs_encoder_type = "efficientnet"
         else:
-            raise NotImplementedError(f"Unsupported obs_encoder: {obs_encoder}")
+            raise NotImplementedError
         
         # -------- 目标编码器：对 “当前观测 + 目标” 拼接后的 6 通道图像编码 --------
-        self.goal_encoder = timm.create_model(
-            "efficientnet_b0",
-            pretrained=True,
-            in_chans=6,
-            num_classes=0,
-        )
+        self.goal_encoder = EfficientNet.from_name("efficientnet-b0", in_channels=6) # obs+goal
         self.goal_encoder = replace_bn_with_gn(self.goal_encoder)
-        self.num_goal_features = self.goal_encoder.num_features
+        self.num_goal_features = self.goal_encoder._fc.in_features
 
         # 若 EfficientNet 输出维度与期望的 encoding_size 不一致，则用线性层压缩到统一维度
         if self.num_obs_features != self.obs_encoding_size:
@@ -90,21 +79,19 @@ class NoMaD_ViNT(nn.Module):
 
         # 初始化目标编码（占位，后续会用 obsgoal_encoding 填充）
         goal_encoding = torch.zeros((obs_img.size()[0], 1, self.goal_encoding_size)).to(device)
-
-        # 若调用方传入了 goal mask（形状 [B]，值为 0 或 1），则根据该 mask 决定是否遮蔽目标 token
-        goal_mask = None
+        
+        # 若调用方传入了 goal mask（形状 [B]，值为 0 或 1），则根据该 mask 决定是否遮蔽目标 token 
         if input_goal_mask is not None:
             goal_mask = input_goal_mask.to(device)
 
         # -------- 1) 目标编码：将“当前观测 + 目标”在通道维拼接为 6 通道输入 --------
-        obsgoal_img = torch.cat(
-            [obs_img[:, 3 * self.context_size :, :, :], goal_img], dim=1
-        )
-        obsgoal_feats = self.goal_encoder.forward_features(obsgoal_img)
-        if obsgoal_feats.ndim == 4:
-            obsgoal_encoding = F.adaptive_avg_pool2d(obsgoal_feats, (1, 1)).flatten(start_dim=1)
-        else:
-            obsgoal_encoding = obsgoal_feats
+        obsgoal_img = torch.cat([obs_img[:, 3*self.context_size:, :, :], goal_img], dim=1) # concatenate the obs image/context and goal image --> non image goal?
+        obsgoal_encoding = self.goal_encoder.extract_features(obsgoal_img) # get encoding of this img 
+        obsgoal_encoding = self.goal_encoder._avg_pooling(obsgoal_encoding) # avg pooling 
+        
+        if self.goal_encoder._global_params.include_top:
+            obsgoal_encoding = obsgoal_encoding.flatten(start_dim=1)
+            obsgoal_encoding = self.goal_encoder._dropout(obsgoal_encoding)
         obsgoal_encoding = self.compress_goal_enc(obsgoal_encoding)
 
         if len(obsgoal_encoding.shape) == 2:
@@ -116,11 +103,11 @@ class NoMaD_ViNT(nn.Module):
         obs_img = torch.split(obs_img, 3, dim=1)
         obs_img = torch.concat(obs_img, dim=0)
 
-        obs_feats = self.obs_encoder.forward_features(obs_img)
-        if obs_feats.ndim == 4:
-            obs_encoding = F.adaptive_avg_pool2d(obs_feats, (1, 1)).flatten(start_dim=1)
-        else:
-            obs_encoding = obs_feats
+        obs_encoding = self.obs_encoder.extract_features(obs_img)
+        obs_encoding = self.obs_encoder._avg_pooling(obs_encoding)
+        if self.obs_encoder._global_params.include_top:
+            obs_encoding = obs_encoding.flatten(start_dim=1)
+            obs_encoding = self.obs_encoder._dropout(obs_encoding)
         obs_encoding = self.compress_obs_enc(obs_encoding)
         # 现在 obs_encoding: [B * (context_size+1), obs_encoding_size]
         # 重新 reshape 回 [B, context_size+1, obs_encoding_size]，再在最后拼上 goal token
