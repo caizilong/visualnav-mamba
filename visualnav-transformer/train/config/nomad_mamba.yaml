@@ -5,7 +5,7 @@ run_name: nomad_mamba
 use_wandb: True                           # 是否启用 wandb
 train: True
 batch_size: 128
-epochs: 100
+epochs: 150
 gpu_ids: [0]
 num_workers: 12
 lr: 1e-4
@@ -88,13 +88,13 @@ datasets:
     end_slack: 0 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
     goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
     negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略
-  # recon:
-  #   data_folder: /workspace/datasets/recon
-  #   train: vint_train/data/data_splits/recon/train/ # path to train folder with traj_names.txt
-  #   test: vint_train/data/data_splits/recon/test/ # path to test folder with traj_names.txt
-  #   end_slack: 3 # because many trajectories end in collisions
-  #   goals_per_obs: 1 # how many goals are sampled per observation
-  #   negative_mining: True # negative mining from the ViNG paper (Shah et al.)
+  recon:
+    data_folder: /workspace/datasets/recon
+    train: vint_train/data/data_splits/recon/train/ # path to train folder with traj_names.txt
+    test: vint_train/data/data_splits/recon/test/ # path to test folder with traj_names.txt
+    end_slack: 3 # because many trajectories end in collisions
+    goals_per_obs: 1 # how many goals are sampled per observation
+    negative_mining: True # negative mining from the ViNG paper (Shah et al.)
   # recon:
   #   data_folder: /home/<username>/nomad_dataset/recon
   #   train: /home/<username>/data_splits/recon/train/
@@ -138,6 +138,6 @@ image_log_freq: 0                      # 关闭图像上传（最省流量）
 num_images_log: 8
 pairwise_test_freq: 0
 eval_fraction: 0.25
-wandb_log_freq: 500                    # 每 500 个 batch 上传一次标量日志
+wandb_log_freq: 100                    # 每 500 个 batch 上传一次标量日志
 eval_freq: 1
 

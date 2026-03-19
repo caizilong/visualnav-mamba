@@ -270,6 +270,7 @@ def train_eval_loop_nomad(
                     print_log_freq=print_log_freq,
                     num_images_log=num_images_log,
                     wandb_log_freq=wandb_log_freq,
+                    image_log_freq=image_log_freq,
                     use_wandb=use_wandb,
                     eval_fraction=eval_fraction,
                 )
