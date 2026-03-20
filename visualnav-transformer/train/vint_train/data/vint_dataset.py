@@ -134,11 +134,14 @@ class ViNT_Dataset(Dataset):
 
     def _build_caches(self, use_tqdm: bool = True):
         """
-        Build a cache of images for faster loading using LMDB
+        Build a cache of images for faster loading using LMDB.
+        Images are pre-resized to the target size during cache building for better training efficiency.
         """
+        # 缓存文件名包含 image_size，以区分不同尺寸的缓存
+        img_w, img_h = self.image_size
         cache_filename = os.path.join(
             self.data_split_folder,
-            f"dataset_{self.dataset_name}.lmdb",
+            f"dataset_{self.dataset_name}_{img_w}x{img_h}.lmdb",
         )
 
         # Load all the trajectories into memory. These should already be loaded, but just in case.
@@ -146,21 +149,26 @@ class ViNT_Dataset(Dataset):
             self._get_trajectory(traj_name)
 
         """
-        If the cache file doesn't exist, create it by iterating through the dataset and writing each image to the cache
+        If the cache file doesn't exist, create it by iterating through the dataset,
+        pre-resize images to target size, and writing to the cache.
         """
         if not os.path.exists(cache_filename):
+            from PIL import Image
             tqdm_iterator = tqdm.tqdm(
                 self.goals_index,
                 disable=not use_tqdm,
                 dynamic_ncols=True,
-                desc=f"Building LMDB cache for {self.dataset_name}"
+                desc=f"Building LMDB cache for {self.dataset_name} (pre-resizing to {img_w}x{img_h})"
             )
             with lmdb.open(cache_filename, map_size=2**40) as image_cache:
                 with image_cache.begin(write=True) as txn:
                     for traj_name, time in tqdm_iterator:
                         image_path = get_data_path(self.data_folder, traj_name, time)
-                        with open(image_path, "rb") as f:
-                            txn.put(image_path.encode(), f.read())
+                        # 预先 resize 图片到目标尺寸并保存
+                        resized_tensor = img_path_to_data(image_path, self.image_size)
+                        # 将 tensor 序列化保存到 LMDB
+                        tensor_bytes = pickle.dumps(resized_tensor)
+                        txn.put(image_path.encode(), tensor_bytes)
 
         # Reopen the cache file in read-only mode
         self._image_cache: lmdb.Environment = lmdb.open(cache_filename, readonly=True)
@@ -225,14 +233,16 @@ class ViNT_Dataset(Dataset):
                 pickle.dump((self.index_to_data, self.goals_index), f)
 
     def _load_image(self, trajectory_name, time):
+        """Load pre-resized image tensor from LMDB cache."""
         image_path = get_data_path(self.data_folder, trajectory_name, time)
 
         try:
             with self._image_cache.begin() as txn:
                 image_buffer = txn.get(image_path.encode())
-                image_bytes = bytes(image_buffer)
-            image_bytes = io.BytesIO(image_bytes)
-            return img_path_to_data(image_bytes, self.image_size)
+                tensor_bytes = bytes(image_buffer)
+            # 直接加载已经 resize 好的 tensor
+            resized_tensor = pickle.loads(tensor_bytes)
+            return resized_tensor
         except TypeError:
             print(f"Failed to load image {image_path}")
 
