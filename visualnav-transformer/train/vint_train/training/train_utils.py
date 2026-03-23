@@ -797,6 +797,10 @@ def evaluate_nomad(
     ema_model = ema_model.averaged_model
     ema_model.eval()
     
+    # 清理CUDA缓存，防止内存碎片化
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
     num_batches = len(dataloader)
 
     uc_action_loss_logger = Logger("uc_action_loss", eval_type, window_size=print_log_freq)
@@ -825,140 +829,141 @@ def evaluate_nomad(
     }
     num_batches = max(int(num_batches * eval_fraction), 1)
 
-    with tqdm.tqdm(
-        itertools.islice(dataloader, num_batches), 
-        total=num_batches, 
-        dynamic_ncols=True, 
-        desc=f"Evaluating {eval_type} for epoch {epoch}", 
-        leave=False) as tepoch:
-        for i, data in enumerate(tepoch):
-            (
-                obs_image, 
-                goal_image,
-                actions,
-                distance,
-                goal_pos,
-                dataset_idx,
-                action_mask,
-            ) = data
-            
-            obs_images = torch.split(obs_image, 3, dim=1)
-            batch_viz_obs_images = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE[::-1])
-            batch_viz_goal_images = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE[::-1])
-            batch_obs_images = [transform(obs) for obs in obs_images]
-            batch_obs_images = torch.cat(batch_obs_images, dim=1).to(device)
-            batch_goal_images = transform(goal_image).to(device)
-            action_mask = action_mask.to(device)
-
-            B = actions.shape[0]
-
-            # Generate random goal mask
-            rand_goal_mask = (torch.rand((B,)) < goal_mask_prob).long().to(device)
-            goal_mask = torch.ones_like(rand_goal_mask).long().to(device)
-            no_mask = torch.zeros_like(rand_goal_mask).long().to(device)
-
-            rand_mask_cond = ema_model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=rand_goal_mask)
-
-            obsgoal_cond = ema_model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=no_mask)
-            obsgoal_cond = obsgoal_cond.flatten(start_dim=1)
-
-            goal_mask_cond = ema_model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=goal_mask)
-
-            distance = distance.to(device)
-
-            deltas = get_delta(actions)
-            ndeltas = normalize_data(deltas, ACTION_STATS)
-            naction = from_numpy(ndeltas).to(device)
-            assert naction.shape[-1] == 2, "action dim must be 2"
-
-            # Sample noise to add to actions
-            noise = torch.randn(naction.shape, device=device)
-
-            # Sample a diffusion iteration for each data point
-            timesteps = torch.randint(
-                0, noise_scheduler.config.num_train_timesteps,
-                (B,), device=device
-            ).long()
-
-            noisy_actions = noise_scheduler.add_noise(
-                naction, noise, timesteps)
-
-            ### RANDOM MASK ERROR ###
-            # Predict the noise residual
-            rand_mask_noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=rand_mask_cond)
-            
-            # L2 loss
-            rand_mask_loss = nn.functional.mse_loss(rand_mask_noise_pred, noise)
-            
-            ### NO MASK ERROR ###
-            # Predict the noise residual
-            no_mask_noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=obsgoal_cond)
-            
-            # L2 loss
-            no_mask_loss = nn.functional.mse_loss(no_mask_noise_pred, noise)
-
-            ### GOAL MASK ERROR ###
-            # predict the noise residual
-            goal_mask_noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=goal_mask_cond)
-            
-            # L2 loss
-            goal_mask_loss = nn.functional.mse_loss(goal_mask_noise_pred, noise)
-            
-            # Logging
-            loss_cpu = rand_mask_loss.item()
-            tepoch.set_postfix(loss=loss_cpu)
-
-            wandb.log({"epoch": epoch, "diffusion_eval_loss (random masking)": rand_mask_loss})
-            wandb.log({"epoch": epoch, "diffusion_eval_loss (no masking)": no_mask_loss})
-            wandb.log({"epoch": epoch, "diffusion_eval_loss (goal masking)": goal_mask_loss})
-
-            if i % print_log_freq == 0 and print_log_freq != 0:
-                losses = _compute_losses_nomad(
-                            ema_model,
-                            noise_scheduler,
-                            batch_obs_images,
-                            batch_goal_images,
-                            distance.to(device),
-                            actions.to(device),
-                            device,
-                            action_mask.to(device),
-                        )
-                
-                for key, value in losses.items():
-                    if key in loggers:
-                        logger = loggers[key]
-                        logger.log_data(value.item())
-            
-                data_log = {}
-                for key, logger in loggers.items():
-                    data_log[logger.full_name()] = logger.latest()
-                    if i % print_log_freq == 0 and print_log_freq != 0:
-                        print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
-
-                if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-                    wandb_data_log = {"epoch": epoch}
-                    wandb_data_log.update(data_log)
-                    wandb.log(wandb_data_log, commit=True)
-
-            if image_log_freq != 0 and i % image_log_freq == 0:
-                visualize_diffusion_action_distribution(
-                    ema_model,
-                    noise_scheduler,
-                    batch_obs_images,
-                    batch_goal_images,
-                    batch_viz_obs_images,
-                    batch_viz_goal_images,
+    with torch.no_grad():
+        with tqdm.tqdm(
+            itertools.islice(dataloader, num_batches), 
+            total=num_batches, 
+            dynamic_ncols=True, 
+            desc=f"Evaluating {eval_type} for epoch {epoch}", 
+            leave=False) as tepoch:
+            for i, data in enumerate(tepoch):
+                (
+                    obs_image, 
+                    goal_image,
                     actions,
                     distance,
                     goal_pos,
-                    device,
-                    eval_type,
-                    project_folder,
-                    epoch,
-                    num_images_log,
-                    30,
-                    use_wandb,
-                )
+                    dataset_idx,
+                    action_mask,
+                ) = data
+                
+                obs_images = torch.split(obs_image, 3, dim=1)
+                batch_viz_obs_images = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE[::-1])
+                batch_viz_goal_images = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE[::-1])
+                batch_obs_images = [transform(obs) for obs in obs_images]
+                batch_obs_images = torch.cat(batch_obs_images, dim=1).to(device)
+                batch_goal_images = transform(goal_image).to(device)
+                action_mask = action_mask.to(device)
+
+                B = actions.shape[0]
+
+                # Generate random goal mask
+                rand_goal_mask = (torch.rand((B,)) < goal_mask_prob).long().to(device)
+                goal_mask = torch.ones_like(rand_goal_mask).long().to(device)
+                no_mask = torch.zeros_like(rand_goal_mask).long().to(device)
+
+                rand_mask_cond = ema_model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=rand_goal_mask)
+
+                obsgoal_cond = ema_model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=no_mask)
+                obsgoal_cond = obsgoal_cond.flatten(start_dim=1)
+
+                goal_mask_cond = ema_model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=goal_mask)
+
+                distance = distance.to(device)
+
+                deltas = get_delta(actions)
+                ndeltas = normalize_data(deltas, ACTION_STATS)
+                naction = from_numpy(ndeltas).to(device)
+                assert naction.shape[-1] == 2, "action dim must be 2"
+
+                # Sample noise to add to actions
+                noise = torch.randn(naction.shape, device=device)
+
+                # Sample a diffusion iteration for each data point
+                timesteps = torch.randint(
+                    0, noise_scheduler.config.num_train_timesteps,
+                    (B,), device=device
+                ).long()
+
+                noisy_actions = noise_scheduler.add_noise(
+                    naction, noise, timesteps)
+
+                ### RANDOM MASK ERROR ###
+                # Predict the noise residual
+                rand_mask_noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=rand_mask_cond)
+                
+                # L2 loss
+                rand_mask_loss = nn.functional.mse_loss(rand_mask_noise_pred, noise)
+                
+                ### NO MASK ERROR ###
+                # Predict the noise residual
+                no_mask_noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=obsgoal_cond)
+                
+                # L2 loss
+                no_mask_loss = nn.functional.mse_loss(no_mask_noise_pred, noise)
+
+                ### GOAL MASK ERROR ###
+                # predict the noise residual
+                goal_mask_noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=goal_mask_cond)
+                
+                # L2 loss
+                goal_mask_loss = nn.functional.mse_loss(goal_mask_noise_pred, noise)
+                
+                # Logging
+                loss_cpu = rand_mask_loss.item()
+                tepoch.set_postfix(loss=loss_cpu)
+
+                wandb.log({"epoch": epoch, "diffusion_eval_loss (random masking)": rand_mask_loss})
+                wandb.log({"epoch": epoch, "diffusion_eval_loss (no masking)": no_mask_loss})
+                wandb.log({"epoch": epoch, "diffusion_eval_loss (goal masking)": goal_mask_loss})
+
+                if i % print_log_freq == 0 and print_log_freq != 0:
+                    losses = _compute_losses_nomad(
+                                ema_model,
+                                noise_scheduler,
+                                batch_obs_images,
+                                batch_goal_images,
+                                distance.to(device),
+                                actions.to(device),
+                                device,
+                                action_mask.to(device),
+                            )
+                    
+                    for key, value in losses.items():
+                        if key in loggers:
+                            logger = loggers[key]
+                            logger.log_data(value.item())
+                
+                    data_log = {}
+                    for key, logger in loggers.items():
+                        data_log[logger.full_name()] = logger.latest()
+                        if i % print_log_freq == 0 and print_log_freq != 0:
+                            print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
+
+                    if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
+                        wandb_data_log = {"epoch": epoch}
+                        wandb_data_log.update(data_log)
+                        wandb.log(wandb_data_log, commit=True)
+
+                if image_log_freq != 0 and i % image_log_freq == 0:
+                    visualize_diffusion_action_distribution(
+                        ema_model,
+                        noise_scheduler,
+                        batch_obs_images,
+                        batch_goal_images,
+                        batch_viz_obs_images,
+                        batch_viz_goal_images,
+                        actions,
+                        distance,
+                        goal_pos,
+                        device,
+                        eval_type,
+                        project_folder,
+                        epoch,
+                        num_images_log,
+                        30,
+                        use_wandb,
+                    )
 
 
 # normalize data
