@@ -14,9 +14,9 @@ nomad:
   config_path: "../../train/config/nomad.yaml"
   ckpt_path: "../model_weights/nomad.pth"
 
-# NoMaD-Mamba 模型（训练完成后将 ckpt_path 指向对应 .pth）
-# nomad_mamba:
-#   config_path: "../../train/config/nomad_mamba.yaml"
-#   ckpt_path: "../model_weights/nomad_mamba.pth"
+nomad_mamba:
+  config_path: "../../train/config/nomad_mamba.yaml"
+  ckpt_path: "../model_weights/nomad_mamba.pth"
 
-# add your own model configs here after saving the *.pth file to ../model_weight
+# 权重命名约定：将 NoMaD-Mamba checkpoint 保存为 ../model_weights/nomad_mamba.pth
+# add your own model configs here after saving the *.pth file to ../model_weights/

@@ -61,6 +61,26 @@ def callback_obs(msg):
             context_queue.append(obs_img)
 
 
+def apply_benchmark_config(args: argparse.Namespace, section: str) -> argparse.Namespace:
+    """用 benchmark 配置文件覆盖命令行参数，便于复现实验。"""
+    if not args.benchmark_config:
+        return args
+
+    with open(args.benchmark_config, "r") as f:
+        benchmark_cfg = yaml.safe_load(f) or {}
+
+    merged_cfg = {}
+    merged_cfg.update(benchmark_cfg.get("common", {}))
+    merged_cfg.update(benchmark_cfg.get(section, {}))
+    for key, value in merged_cfg.items():
+        attr_name = key.replace("-", "_")
+        if hasattr(args, attr_name):
+            setattr(args, attr_name, value)
+
+    print(f"Loaded benchmark config from {args.benchmark_config} ({section})")
+    return args
+
+
 def main(args: argparse.Namespace):
     global context_size
 
@@ -256,7 +276,13 @@ if __name__ == "__main__":
         "-m",
         default="nomad",
         type=str,
-        help="model name (only nomad is supported) (hint: check ../config/models.yaml) (default: nomad)",
+        help="model name (hint: check ../config/models.yaml) (default: nomad)",
+    )
+    parser.add_argument(
+        "--benchmark-config",
+        default=None,
+        type=str,
+        help="optional YAML file with reproducible benchmark defaults",
     )
     parser.add_argument(
         "--waypoint",
@@ -305,6 +331,6 @@ if __name__ == "__main__":
         help=f"Number of actions sampled from the exploration model (default: 8)",
     )
     args = parser.parse_args()
+    args = apply_benchmark_config(args, "navigate")
     print(f"Using {device}")
     main(args)
-

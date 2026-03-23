@@ -1,0 +1,14 @@
+common:
+  model: nomad_mamba
+
+navigate:
+  dir: topomap
+  goal_node: -1
+  waypoint: 2
+  close_threshold: 3
+  radius: 4
+  num_samples: 8
+
+explore:
+  waypoint: 2
+  num_samples: 8

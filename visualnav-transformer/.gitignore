@@ -12,6 +12,7 @@ train/gnm_dataset/*
 *.gif
 
 deployment/model_weights/*
+!deployment/model_weights/README.md
 deployment/topomaps/*
 
 .vscode/*
