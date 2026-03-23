@@ -659,8 +659,16 @@ def train_nomad(
 
             # -------- 2) 距离预测损失 --------
             dist_pred = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
-            dist_loss = nn.functional.mse_loss(dist_pred.squeeze(-1), distance)
-            dist_loss = (dist_loss * (1 - goal_mask.float())).mean() / (1e-2 +(1 - goal_mask.float()).mean())
+            # 逐样本计算距离损失，再屏蔽掉训练时被 goal-mask 的样本。
+            dist_loss_per_sample = nn.functional.mse_loss(
+                dist_pred.squeeze(-1),
+                distance,
+                reduction="none",
+            )
+            valid_dist_mask = 1 - goal_mask.float()
+            dist_loss = (dist_loss_per_sample * valid_dist_mask).sum() / (
+                valid_dist_mask.sum() + 1e-2
+            )
 
             # Sample noise to add to actions：为每条轨迹采样高斯噪声
             noise = torch.randn(naction.shape, device=device)
@@ -1218,5 +1226,4 @@ def visualize_diffusion_action_distribution(
         plt.close(fig)
     if len(wandb_list) > 0 and use_wandb:
         wandb.log({"epoch": epoch, f"{eval_type}_action_samples": wandb_list}, commit=False)
-
 

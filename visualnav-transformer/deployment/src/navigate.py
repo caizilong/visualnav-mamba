@@ -148,17 +148,24 @@ def main(args: argparse.Namespace):
                 goal_image = [transform_images(g_img, model_params["image_size"], center_crop=False).to(device) for g_img in topomap[start:end + 1]]
                 goal_image = torch.concat(goal_image, dim=0)
 
-                obsgoal_cond = model('vision_encoder', obs_img=obs_images.repeat(len(goal_image), 1, 1, 1), goal_img=goal_image, input_goal_mask=mask.repeat(len(goal_image)))
-                dists = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
-                dists = to_numpy(dists.flatten())
-                min_idx = np.argmin(dists)
-                closest_node = min_idx + start
-                print("closest node:", closest_node)
-                sg_idx = min(min_idx + int(dists[min_idx] < args.close_threshold), len(obsgoal_cond) - 1)
-                obs_cond = obsgoal_cond[sg_idx].unsqueeze(0)
+                with torch.inference_mode():
+                    obsgoal_cond = model(
+                        'vision_encoder',
+                        obs_img=obs_images.repeat(len(goal_image), 1, 1, 1),
+                        goal_img=goal_image,
+                        input_goal_mask=mask.repeat(len(goal_image)),
+                    )
+                    dists = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
+                    dists = to_numpy(dists.flatten())
+                    min_idx = np.argmin(dists)
+                    closest_node = min_idx + start
+                    print("closest node:", closest_node)
+                    sg_idx = min(
+                        min_idx + int(dists[min_idx] < args.close_threshold),
+                        len(obsgoal_cond) - 1,
+                    )
+                    obs_cond = obsgoal_cond[sg_idx].unsqueeze(0)
 
-                # infer action
-                with torch.no_grad():
                     # encoder vision features
                     if len(obs_cond.shape) == 2:
                         obs_cond = obs_cond.repeat(args.num_samples, 1)
@@ -214,9 +221,10 @@ def main(args: argparse.Namespace):
                 batch_obs_imgs = torch.cat(batch_obs_imgs, dim=0).to(device)
                 batch_goal_data = torch.cat(batch_goal_data, dim=0).to(device)
 
-                distances, waypoints = model(batch_obs_imgs, batch_goal_data)
-                distances = to_numpy(distances)
-                waypoints = to_numpy(waypoints)
+                with torch.inference_mode():
+                    distances, waypoints = model(batch_obs_imgs, batch_goal_data)
+                    distances = to_numpy(distances)
+                    waypoints = to_numpy(waypoints)
                 # 找到当前观测到所有子目标中预测“时间距离”最小的节点
                 min_dist_idx = np.argmin(distances)
                 # chose subgoal and output waypoints
@@ -299,5 +307,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(f"Using {device}")
     main(args)
-
 

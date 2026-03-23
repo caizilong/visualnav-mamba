@@ -64,7 +64,7 @@ normalize: True
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal
-context_size: 5
+context_size: 7                           # 拉长历史窗口，避免 Mamba 只处理过短序列
 alpha: 1e-4                               # 与原 NoMaD 相同：距离损失权重很小
 
 # ---------------- 距离 / 动作 标签范围 ----------------
@@ -148,4 +148,3 @@ pairwise_test_freq: 0
 eval_fraction: 0.25
 wandb_log_freq: 100                    # 每 500 个 batch 上传一次标量日志
 eval_freq: 1
-
