@@ -81,6 +81,20 @@ def apply_benchmark_config(args: argparse.Namespace, section: str) -> argparse.N
     return args
 
 
+def diffusion_guidance_scale(
+    step_idx: int,
+    total_steps: int,
+    min_scale: float,
+    max_scale: float,
+    power: float,
+) -> float:
+    """前期弱 guidance 鼓励探索，后期强 guidance 逼近目标。"""
+    if total_steps <= 1:
+        return max_scale
+    progress = step_idx / float(total_steps - 1)
+    return min_scale + (max_scale - min_scale) * (progress ** power)
+
+
 def main(args: argparse.Namespace):
     global context_size
 
@@ -93,6 +107,15 @@ def main(args: argparse.Namespace):
         model_params = yaml.safe_load(f)
 
     context_size = model_params["context_size"]
+    guidance_min = args.guidance_min
+    if guidance_min is None:
+        guidance_min = model_params.get("goal_guidance_min", 1.0)
+    guidance_max = args.guidance_max
+    if guidance_max is None:
+        guidance_max = model_params.get("goal_guidance_max", 1.0)
+    guidance_power = args.guidance_power
+    if guidance_power is None:
+        guidance_power = model_params.get("goal_guidance_power", 1.0)
 
     # 2) 根据配置加载训练好的权重文件
     ckpth_path = model_paths[args.model]["ckpt_path"]
@@ -184,13 +207,23 @@ def main(args: argparse.Namespace):
                         min_idx + int(dists[min_idx] < args.close_threshold),
                         len(obsgoal_cond) - 1,
                     )
-                    obs_cond = obsgoal_cond[sg_idx].unsqueeze(0)
+                    cond_obs_cond = obsgoal_cond[sg_idx].unsqueeze(0)
+                    selected_goal_img = goal_image[sg_idx].unsqueeze(0)
+                    no_goal_mask = torch.ones(1, dtype=torch.long, device=device)
+                    obs_cond = model(
+                        'vision_encoder',
+                        obs_img=obs_images,
+                        goal_img=selected_goal_img,
+                        input_goal_mask=no_goal_mask,
+                    )
 
                     # encoder vision features
                     if len(obs_cond.shape) == 2:
                         obs_cond = obs_cond.repeat(args.num_samples, 1)
+                        cond_obs_cond = cond_obs_cond.repeat(args.num_samples, 1)
                     else:
                         obs_cond = obs_cond.repeat(args.num_samples, 1, 1)
+                        cond_obs_cond = cond_obs_cond.repeat(args.num_samples, 1, 1)
                     
                     # initialize action from Gaussian noise
                     noisy_action = torch.randn(
@@ -201,13 +234,29 @@ def main(args: argparse.Namespace):
                     noise_scheduler.set_timesteps(num_diffusion_iters)
 
                     start_time = time.time()
-                    for k in noise_scheduler.timesteps[:]:
-                        # predict noise
-                        noise_pred = model(
+                    total_steps = len(noise_scheduler.timesteps)
+                    for step_idx, k in enumerate(noise_scheduler.timesteps[:]):
+                        unconditional_noise = model(
                             'noise_pred_net',
                             sample=naction,
                             timestep=k,
                             global_cond=obs_cond
+                        )
+                        conditional_noise = model(
+                            'noise_pred_net',
+                            sample=naction,
+                            timestep=k,
+                            global_cond=cond_obs_cond
+                        )
+                        guidance_scale = diffusion_guidance_scale(
+                            step_idx,
+                            total_steps,
+                            guidance_min,
+                            guidance_max,
+                            guidance_power,
+                        )
+                        noise_pred = unconditional_noise + guidance_scale * (
+                            conditional_noise - unconditional_noise
                         )
                         # inverse diffusion step (remove noise)
                         naction = noise_scheduler.step(
@@ -329,6 +378,24 @@ if __name__ == "__main__":
         default=8,
         type=int,
         help=f"Number of actions sampled from the exploration model (default: 8)",
+    )
+    parser.add_argument(
+        "--guidance-min",
+        default=None,
+        type=float,
+        help="minimum goal guidance scale at early denoising steps",
+    )
+    parser.add_argument(
+        "--guidance-max",
+        default=None,
+        type=float,
+        help="maximum goal guidance scale at late denoising steps",
+    )
+    parser.add_argument(
+        "--guidance-power",
+        default=None,
+        type=float,
+        help="power used by the guidance schedule",
     )
     args = parser.parse_args()
     args = apply_benchmark_config(args, "navigate")

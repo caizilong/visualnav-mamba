@@ -8,6 +8,9 @@ navigate:
   close_threshold: 3
   radius: 4
   num_samples: 8
+  guidance_min: 0.25
+  guidance_max: 1.75
+  guidance_power: 1.5
 
 explore:
   waypoint: 2

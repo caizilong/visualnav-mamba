@@ -88,6 +88,8 @@ def load_model(
                 mha_ff_dim_factor=config["mha_ff_dim_factor"],
                 mamba_cfg=MambaConfig.from_dict(config),
                 img_size=img_size_hw,
+                bidirectional_mamba=config.get("bidirectional_mamba", True),
+                goal_fusion_hidden_dim=config.get("goal_fusion_hidden_dim", None),
             )
         elif config["vision_encoder"] == "vit": 
             vision_encoder = ViT(

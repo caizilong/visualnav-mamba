@@ -133,6 +133,8 @@ class NoMaD_Mamba(nn.Module):
         mha_ff_dim_factor: Optional[int] = 4,         # 未使用，仅为兼容
         mamba_cfg: Optional["MambaConfig"] = None,
         img_size: Optional[Tuple[int, int]] = None,   # 新增：输入图像尺寸 (H, W)，用于 ViT 类模型
+        bidirectional_mamba: bool = True,
+        goal_fusion_hidden_dim: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -140,6 +142,12 @@ class NoMaD_Mamba(nn.Module):
         self.goal_encoding_size = obs_encoding_size
         self.context_size = context_size
         self.img_size = img_size
+        self.bidirectional_mamba = bidirectional_mamba
+        self.goal_fusion_hidden_dim = (
+            goal_fusion_hidden_dim
+            if goal_fusion_hidden_dim is not None
+            else 2 * self.obs_encoding_size
+        )
         
         # 如果未指定 goal_encoder，则使用与 obs_encoder 相同的类型
         if goal_encoder is None:
@@ -155,10 +163,10 @@ class NoMaD_Mamba(nn.Module):
         )
         self.obs_encoder_type = _normalize_model_name(obs_encoder)
 
-        # -------- 目标编码器：对 "当前观测 + 目标" 拼接后的 6 通道图像编码 --------
+        # -------- 目标编码器：对单张 RGB 目标图像做特征提取（保持与预训练输入分布一致） --------
         self.goal_encoder, self.num_goal_features = _create_timm_encoder(
             model_name=goal_encoder,
-            in_chans=6,  # 当前观测(3) + 目标图像(3) 拼接
+            in_chans=3,
             pretrained=True,
             use_gn=True,
             img_size=img_size,
@@ -174,6 +182,24 @@ class NoMaD_Mamba(nn.Module):
             self.compress_goal_enc = nn.Linear(self.num_goal_features, self.goal_encoding_size)
         else:
             self.compress_goal_enc = nn.Identity()
+
+        # 当前观察帧与目标帧分离编码后，再通过轻量门控融合形成目标 token。
+        pair_dim = 4 * self.obs_encoding_size
+        self.goal_gate = nn.Sequential(
+            nn.Linear(pair_dim, self.goal_fusion_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.goal_fusion_hidden_dim, self.goal_encoding_size),
+        )
+        self.goal_delta = nn.Sequential(
+            nn.Linear(pair_dim, self.goal_fusion_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.goal_fusion_hidden_dim, self.goal_encoding_size),
+        )
+        self.obs_goal_modulation = nn.Sequential(
+            nn.Linear(pair_dim, self.goal_fusion_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.goal_fusion_hidden_dim, 2 * self.obs_encoding_size),
+        )
 
         # -------- 位置编码 + Mamba2 序列建模 --------
         self.positional_encoding = PositionalEncoding(
@@ -213,6 +239,16 @@ class NoMaD_Mamba(nn.Module):
         self.mamba_norms = nn.ModuleList(
             [nn.LayerNorm(self.obs_encoding_size) for _ in range(mha_num_attention_layers)]
         )
+        if self.bidirectional_mamba:
+            self.mamba_layers_backward = nn.ModuleList(
+                [_make_mamba_layer(self.obs_encoding_size) for _ in range(mha_num_attention_layers)]
+            )
+            self.mamba_norms_backward = nn.ModuleList(
+                [nn.LayerNorm(self.obs_encoding_size) for _ in range(mha_num_attention_layers)]
+            )
+        else:
+            self.mamba_layers_backward = None
+            self.mamba_norms_backward = None
 
         # goal mask 相关，与 NoMaD_ViNT 保持一致；注册为 buffer 随模型自动迁移设备
         goal_mask = torch.zeros((1, self.context_size + 2), dtype=torch.bool)
@@ -230,6 +266,43 @@ class NoMaD_Mamba(nn.Module):
         self.register_buffer("no_mask", no_mask)
         self.register_buffer("all_masks", all_masks)
         self.register_buffer("avg_pool_mask", avg_pool_mask)
+
+    def _make_pair_features(self, obs_feat: torch.Tensor, goal_feat: torch.Tensor) -> torch.Tensor:
+        return torch.cat(
+            [
+                obs_feat,
+                goal_feat,
+                obs_feat * goal_feat,
+                torch.abs(obs_feat - goal_feat),
+            ],
+            dim=-1,
+        )
+
+    def _encode_goal_token(
+        self,
+        current_obs_token: torch.Tensor,
+        goal_img: torch.Tensor,
+    ) -> torch.Tensor:
+        goal_encoding = _extract_features(self.goal_encoder, goal_img)
+        goal_encoding = self.compress_goal_enc(goal_encoding)
+        pair_features = self._make_pair_features(current_obs_token, goal_encoding)
+        goal_gate = torch.sigmoid(self.goal_gate(pair_features))
+        goal_delta = self.goal_delta(pair_features)
+        fused_goal = goal_encoding + goal_gate * goal_delta
+        return fused_goal.unsqueeze(1)
+
+    def _apply_goal_modulation(
+        self,
+        obs_encoding: torch.Tensor,
+        goal_token: torch.Tensor,
+    ) -> torch.Tensor:
+        goal_context = goal_token.expand(-1, obs_encoding.shape[1], -1)
+        pair_features = self._make_pair_features(obs_encoding, goal_context)
+        modulation = self.obs_goal_modulation(pair_features.reshape(-1, pair_features.shape[-1]))
+        modulation = modulation.reshape(obs_encoding.shape[0], obs_encoding.shape[1], -1)
+        scale, bias = torch.chunk(modulation, 2, dim=-1)
+        # 使用较小幅度的 FiLM 调制，避免训练初期破坏原始视觉表示。
+        return obs_encoding * (1 + 0.1 * torch.tanh(scale)) + 0.1 * bias
 
     def forward(
         self,
@@ -249,25 +322,11 @@ class NoMaD_Mamba(nn.Module):
         """
         device = obs_img.device
 
-        # ------- 1) 目标编码 -------
+        # ------- 1) 观测编码：将多帧观测拆成单帧再堆叠 -------
         goal_mask = None
         if input_goal_mask is not None:
             goal_mask = input_goal_mask.to(device)
 
-        # 当前观测的图像位于 obs_img 的最后一段通道上
-        obsgoal_img = torch.cat(
-            [obs_img[:, 3 * self.context_size :, :, :], goal_img], dim=1
-        )  # [B, 6, H, W]
-        # 使用统一的特征提取函数，支持 CNN 和 ViT 等不同架构
-        obsgoal_encoding = _extract_features(self.goal_encoder, obsgoal_img)
-        obsgoal_encoding = self.compress_goal_enc(obsgoal_encoding)
-
-        if obsgoal_encoding.ndim == 2:
-            obsgoal_encoding = obsgoal_encoding.unsqueeze(1)  # [B, 1, C]
-        assert obsgoal_encoding.shape[2] == self.goal_encoding_size
-        goal_encoding = obsgoal_encoding  # [B, 1, C]
-
-        # ------- 2) 观测编码：将多帧观测拆成单帧再堆叠 -------
         obs_split = torch.split(obs_img, 3, dim=1)  # context_size+1 张 [B, 3, H, W]
         obs_stack = torch.cat(obs_split, dim=0)     # [B*(context_size+1), 3, H, W]
 
@@ -282,34 +341,44 @@ class NoMaD_Mamba(nn.Module):
         )
         obs_encoding = torch.transpose(obs_encoding, 0, 1)  # [B, context_size+1, C]
 
+        # ------- 2) 目标编码：单独编码 goal，再与当前观察帧做门控融合 -------
+        current_obs_token = obs_encoding[:, -1, :]
+        goal_encoding = self._encode_goal_token(current_obs_token, goal_img)  # [B, 1, C]
+        goal_conditioned_obs = self._apply_goal_modulation(obs_encoding, goal_encoding)
+
         # ------- 3) 处理 goal mask -------
-        # 与 Transformer 不同，Mamba 没有原生的 padding mask 机制
-        # 但由于 Mamba 是因果模型，goal token 在序列末尾，不会影响前面观测 token 的计算
-        # 为了更好地模拟 Transformer 的 mask 行为，当 goal_mask=1 时将 goal_encoding 置零
-        # 这样 goal token 对最终 pooling 的贡献最小化
         if goal_mask is not None:
             no_goal_mask = goal_mask.long()  # 0 or 1
-            # 将 goal_mask 扩展为 [B, 1, C] 形状，用于逐元素乘法
             goal_mask_expand = goal_mask.float().unsqueeze(1).unsqueeze(2)  # [B, 1, 1]
-            # 当 goal_mask=1 时，将 goal_encoding 置零；goal_mask=0 时保持不变
             goal_encoding = goal_encoding * (1 - goal_mask_expand)
-            # all_masks 已注册为 buffer，自动与模型同设备
+            obs_encoding = obs_encoding + (1 - goal_mask_expand) * (goal_conditioned_obs - obs_encoding)
             src_key_padding_mask = torch.index_select(
                 self.all_masks, 0, no_goal_mask
             )  # [B, seq_len]
         else:
+            obs_encoding = goal_conditioned_obs
             src_key_padding_mask = None
 
         tokens = torch.cat((obs_encoding, goal_encoding), dim=1)  # [B, context_size+2, C]
 
-        # ------- 4) 位置编码 + Mamba2 序列建模 -------
+        # ------- 4) 位置编码 + 双向目标感知 Mamba2 序列建模 -------
         x = tokens
         if self.positional_encoding is not None:
             x = self.positional_encoding(x)
 
-        # Pre-LN 残差：x = x + layer(LayerNorm(x))，先归一化再进 Mamba，梯度更稳定
-        for layer, norm in zip(self.mamba_layers, self.mamba_norms):
-            x = x + layer(norm(x))
+        # Pre-LN 残差：前向 Mamba 负责历史累积，反向 Mamba 将末端 goal 信息传播回观察序列。
+        if self.bidirectional_mamba:
+            for layer_idx, (layer, norm) in enumerate(zip(self.mamba_layers, self.mamba_norms)):
+                forward_delta = layer(norm(x))
+                x_reversed = torch.flip(x, dims=[1])
+                backward_delta = self.mamba_layers_backward[layer_idx](
+                    self.mamba_norms_backward[layer_idx](x_reversed)
+                )
+                backward_delta = torch.flip(backward_delta, dims=[1])
+                x = x + 0.5 * (forward_delta + backward_delta)
+        else:
+            for layer, norm in zip(self.mamba_layers, self.mamba_norms):
+                x = x + layer(norm(x))
 
         # ------- 5) 按 mask 做加权平均池化，得到最终 embedding -------
         if src_key_padding_mask is not None:
@@ -321,4 +390,3 @@ class NoMaD_Mamba(nn.Module):
 
         obs_encoding_tokens = x.mean(dim=1)  # [B, C]
         return obs_encoding_tokens
-

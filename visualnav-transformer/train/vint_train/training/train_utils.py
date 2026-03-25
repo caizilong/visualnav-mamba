@@ -1013,6 +1013,20 @@ def get_action(diffusion_output, action_stats=ACTION_STATS):
     return from_numpy(actions).to(device)
 
 
+def diffusion_guidance_scale(
+    step_idx: int,
+    total_steps: int,
+    min_scale: float = 0.25,
+    max_scale: float = 1.75,
+    power: float = 1.5,
+) -> float:
+    """前期更接近无条件分支，后期增强目标 guidance。"""
+    if total_steps <= 1:
+        return max_scale
+    progress = step_idx / float(total_steps - 1)
+    return min_scale + (max_scale - min_scale) * (progress ** power)
+
+
 def model_output(
     model: nn.Module,
     noise_scheduler: DDPMScheduler,
@@ -1022,6 +1036,9 @@ def model_output(
     action_dim: int,
     num_samples: int,
     device: torch.device,
+    guidance_scale_min: float = 0.25,
+    guidance_scale_max: float = 1.75,
+    guidance_scale_power: float = 1.5,
 ):
     goal_mask = torch.ones((batch_goal_images.shape[0],)).long().to(device)
     obs_cond = model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=goal_mask)
@@ -1039,6 +1056,7 @@ def model_output(
     diffusion_output = noisy_diffusion_output
 
 
+    total_steps = len(noise_scheduler.timesteps)
     for k in noise_scheduler.timesteps[:]:
         # predict noise
         noise_pred = model(
@@ -1062,13 +1080,28 @@ def model_output(
         (len(obs_cond), pred_horizon, action_dim), device=device)
     diffusion_output = noisy_diffusion_output
 
-    for k in noise_scheduler.timesteps[:]:
-        # predict noise
-        noise_pred = model(
+    for step_idx, k in enumerate(noise_scheduler.timesteps[:]):
+        unconditional_noise = model(
+            "noise_pred_net",
+            sample=diffusion_output,
+            timestep=k.unsqueeze(-1).repeat(diffusion_output.shape[0]).to(device),
+            global_cond=obs_cond
+        )
+        conditional_noise = model(
             "noise_pred_net",
             sample=diffusion_output,
             timestep=k.unsqueeze(-1).repeat(diffusion_output.shape[0]).to(device),
             global_cond=obsgoal_cond
+        )
+        guidance_scale = diffusion_guidance_scale(
+            step_idx,
+            total_steps,
+            guidance_scale_min,
+            guidance_scale_max,
+            guidance_scale_power,
+        )
+        noise_pred = unconditional_noise + guidance_scale * (
+            conditional_noise - unconditional_noise
         )
 
         # inverse diffusion step (remove noise)
@@ -1226,4 +1259,3 @@ def visualize_diffusion_action_distribution(
         plt.close(fig)
     if len(wandb_list) > 0 and use_wandb:
         wandb.log({"epoch": epoch, f"{eval_type}_action_samples": wandb_list}, commit=False)
-

@@ -26,6 +26,9 @@ It currently standardizes:
 - `model: nomad_mamba`
 - `waypoint: 2`
 - `num_samples: 8`
+- `guidance_min: 0.25`
+- `guidance_max: 1.75`
+- `guidance_power: 1.5`
 - navigation defaults for `dir`, `goal_node`, `close_threshold`, and `radius`
 
 ## Navigation Commands
