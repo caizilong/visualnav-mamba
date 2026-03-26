@@ -200,6 +200,13 @@ def main(config):
                 img_size=img_size_hw,  # 传递图像尺寸给 ViT 类模型
                 bidirectional_mamba=config.get("bidirectional_mamba", True),
                 goal_fusion_hidden_dim=config.get("goal_fusion_hidden_dim", None),
+                share_visual_backbone=config.get("share_visual_backbone", False),
+                adapter_hidden_dim=config.get("adapter_hidden_dim", None),
+                adapter_scale=config.get("adapter_scale", 0.1),
+                freeze_backbone=config.get("freeze_backbone", False),
+                backbone_trainable_blocks=config.get("backbone_trainable_blocks", 0),
+                backbone_mid_trainable_blocks=config.get("backbone_mid_trainable_blocks", None),
+                backbone_unfreeze_epochs=config.get("backbone_unfreeze_epochs", None),
             )
             # 注：_create_timm_encoder 内部已调用 replace_bn_with_gn，无需重复调用
         elif config["vision_encoder"] == "vib":

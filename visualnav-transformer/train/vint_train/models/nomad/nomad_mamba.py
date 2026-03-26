@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, Callable
+from typing import Optional, Sequence, Tuple
 
 import timm
 
@@ -10,12 +10,48 @@ from .nomad_vint import replace_bn_with_gn
 from .mamba2 import Mamba2, MambaConfig
 
 
+TIMM_MODEL_ALIASES = {
+    "vit_small_patch16_dinov3": "vit_small_patch16_dinov3.lvd_1689m",
+    "vit_base_patch16_dinov3": "vit_base_patch16_dinov3.lvd_1689m",
+    "vit_large_patch16_dinov3": "vit_large_patch16_dinov3.lvd_1689m",
+}
+
+
 def _normalize_model_name(model_name: str) -> str:
     """
     将模型名称标准化为 timm 格式。
     例如: 'efficientnet-b0' -> 'efficientnet_b0'
     """
-    return model_name.replace("-", "_")
+    model_name = model_name.replace("-", "_")
+    return TIMM_MODEL_ALIASES.get(model_name, model_name)
+
+
+class ResidualAdapter(nn.Module):
+    """
+    轻量残差 adapter。
+
+    设计参考了 AdaptFormer 一类 PEFT 做法：主干共享，仅为不同任务/分支学习
+    很小的瓶颈层，并以残差形式注入，避免破坏预训练特征。
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+        scale: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.down_proj = nn.Linear(dim, hidden_dim)
+        self.act = nn.GELU()
+        self.up_proj = nn.Linear(hidden_dim, dim)
+        self.scale = scale
+
+        nn.init.zeros_(self.up_proj.weight)
+        nn.init.zeros_(self.up_proj.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.scale * self.up_proj(self.act(self.down_proj(self.norm(x))))
 
 
 def _create_timm_encoder(
@@ -135,6 +171,13 @@ class NoMaD_Mamba(nn.Module):
         img_size: Optional[Tuple[int, int]] = None,   # 新增：输入图像尺寸 (H, W)，用于 ViT 类模型
         bidirectional_mamba: bool = True,
         goal_fusion_hidden_dim: Optional[int] = None,
+        share_visual_backbone: bool = False,
+        adapter_hidden_dim: Optional[int] = None,
+        adapter_scale: float = 0.1,
+        freeze_backbone: bool = False,
+        backbone_trainable_blocks: int = 0,
+        backbone_mid_trainable_blocks: Optional[int] = None,
+        backbone_unfreeze_epochs: Optional[Sequence[int]] = None,
     ) -> None:
         super().__init__()
 
@@ -148,10 +191,31 @@ class NoMaD_Mamba(nn.Module):
             if goal_fusion_hidden_dim is not None
             else 2 * self.obs_encoding_size
         )
-        
+        self.share_visual_backbone = share_visual_backbone
+        self.freeze_backbone = freeze_backbone
+        self.backbone_trainable_blocks = max(int(backbone_trainable_blocks), 0)
+        if backbone_mid_trainable_blocks is None:
+            if self.backbone_trainable_blocks <= 1:
+                backbone_mid_trainable_blocks = self.backbone_trainable_blocks
+            else:
+                backbone_mid_trainable_blocks = max(1, self.backbone_trainable_blocks // 2)
+        self.backbone_mid_trainable_blocks = max(
+            0, min(int(backbone_mid_trainable_blocks), self.backbone_trainable_blocks)
+        )
+        self.backbone_unfreeze_epochs = tuple(
+            sorted(int(epoch) for epoch in (backbone_unfreeze_epochs or []))
+        )[:2]
+        self._current_trainable_backbone_blocks: Optional[int] = None
+
         # 如果未指定 goal_encoder，则使用与 obs_encoder 相同的类型
         if goal_encoder is None:
             goal_encoder = obs_encoder
+        self.obs_encoder_type = _normalize_model_name(obs_encoder)
+        self.goal_encoder_type = _normalize_model_name(goal_encoder)
+        if self.share_visual_backbone and self.goal_encoder_type != self.obs_encoder_type:
+            raise ValueError(
+                "share_visual_backbone=True 时，obs_encoder 与 goal_encoder 必须是同一种 backbone。"
+            )
 
         # -------- 观测编码器：对单帧 RGB 图像做特征提取（timm） --------
         self.obs_encoder, self.num_obs_features = _create_timm_encoder(
@@ -161,16 +225,19 @@ class NoMaD_Mamba(nn.Module):
             use_gn=True,
             img_size=img_size,
         )
-        self.obs_encoder_type = _normalize_model_name(obs_encoder)
 
-        # -------- 目标编码器：对单张 RGB 目标图像做特征提取（保持与预训练输入分布一致） --------
-        self.goal_encoder, self.num_goal_features = _create_timm_encoder(
-            model_name=goal_encoder,
-            in_chans=3,
-            pretrained=True,
-            use_gn=True,
-            img_size=img_size,
-        )
+        # -------- 目标编码器：与 obs 共用主干，再通过独立 adapter 保留分支差异 --------
+        if self.share_visual_backbone:
+            self.goal_encoder = self.obs_encoder
+            self.num_goal_features = self.num_obs_features
+        else:
+            self.goal_encoder, self.num_goal_features = _create_timm_encoder(
+                model_name=goal_encoder,
+                in_chans=3,
+                pretrained=True,
+                use_gn=True,
+                img_size=img_size,
+            )
 
         # 若 EfficientNet 输出维度与期望的 encoding_size 不一致，则用线性层压缩到统一维度
         if self.num_obs_features != self.obs_encoding_size:
@@ -182,6 +249,22 @@ class NoMaD_Mamba(nn.Module):
             self.compress_goal_enc = nn.Linear(self.num_goal_features, self.goal_encoding_size)
         else:
             self.compress_goal_enc = nn.Identity()
+
+        adapter_hidden_dim = (
+            adapter_hidden_dim
+            if adapter_hidden_dim is not None
+            else max(32, self.obs_encoding_size // 4)
+        )
+        self.obs_adapter = ResidualAdapter(
+            dim=self.obs_encoding_size,
+            hidden_dim=adapter_hidden_dim,
+            scale=adapter_scale,
+        )
+        self.goal_adapter = ResidualAdapter(
+            dim=self.goal_encoding_size,
+            hidden_dim=adapter_hidden_dim,
+            scale=adapter_scale,
+        )
 
         # 当前观察帧与目标帧分离编码后，再通过轻量门控融合形成目标 token。
         pair_dim = 4 * self.obs_encoding_size
@@ -266,6 +349,94 @@ class NoMaD_Mamba(nn.Module):
         self.register_buffer("no_mask", no_mask)
         self.register_buffer("all_masks", all_masks)
         self.register_buffer("avg_pool_mask", avg_pool_mask)
+        self.apply_backbone_unfreeze_schedule(epoch=0)
+
+    def _iter_unique_backbones(self):
+        seen = set()
+        for encoder in (self.obs_encoder, self.goal_encoder):
+            encoder_id = id(encoder)
+            if encoder_id in seen:
+                continue
+            seen.add(encoder_id)
+            yield encoder
+
+    def _set_module_trainable(self, module: nn.Module, trainable: bool) -> None:
+        for parameter in module.parameters():
+            parameter.requires_grad = trainable
+
+    def _set_encoder_trainable_blocks(
+        self,
+        encoder: nn.Module,
+        trainable_blocks: int,
+    ) -> int:
+        blocks = getattr(encoder, "blocks", None)
+        if blocks is None:
+            self._set_module_trainable(encoder, trainable_blocks != 0)
+            return 0
+
+        total_blocks = len(blocks)
+        if trainable_blocks < 0 or trainable_blocks >= total_blocks:
+            self._set_module_trainable(encoder, True)
+            return total_blocks
+
+        self._set_module_trainable(encoder, False)
+        if trainable_blocks > 0:
+            for block in blocks[-trainable_blocks:]:
+                self._set_module_trainable(block, True)
+            for attr_name in ("norm", "fc_norm", "head_norm"):
+                if hasattr(encoder, attr_name):
+                    self._set_module_trainable(getattr(encoder, attr_name), True)
+        return total_blocks
+
+    def set_trainable_backbone_blocks(self, trainable_blocks: int) -> dict:
+        total_blocks = 0
+        for encoder in self._iter_unique_backbones():
+            total_blocks = self._set_encoder_trainable_blocks(encoder, trainable_blocks)
+
+        trainable_backbone_params = 0
+        total_backbone_params = 0
+        for encoder in self._iter_unique_backbones():
+            for parameter in encoder.parameters():
+                total_backbone_params += parameter.numel()
+                if parameter.requires_grad:
+                    trainable_backbone_params += parameter.numel()
+
+        actual_trainable_blocks = (
+            total_blocks if trainable_blocks < 0 else min(trainable_blocks, total_blocks)
+        )
+        changed = actual_trainable_blocks != self._current_trainable_backbone_blocks
+        self._current_trainable_backbone_blocks = actual_trainable_blocks
+        return {
+            "changed": changed,
+            "trainable_blocks": actual_trainable_blocks,
+            "total_blocks": total_blocks,
+            "trainable_backbone_params": trainable_backbone_params,
+            "total_backbone_params": total_backbone_params,
+            "shared_backbone": self.share_visual_backbone,
+        }
+
+    def apply_backbone_unfreeze_schedule(self, epoch: int) -> dict:
+        if not self.freeze_backbone:
+            return self.set_trainable_backbone_blocks(trainable_blocks=-1)
+
+        if len(self.backbone_unfreeze_epochs) == 0:
+            target_blocks = self.backbone_trainable_blocks
+        elif len(self.backbone_unfreeze_epochs) == 1:
+            target_blocks = (
+                0
+                if epoch < self.backbone_unfreeze_epochs[0]
+                else self.backbone_trainable_blocks
+            )
+        else:
+            first_unfreeze_epoch, second_unfreeze_epoch = self.backbone_unfreeze_epochs
+            if epoch < first_unfreeze_epoch:
+                target_blocks = 0
+            elif epoch < second_unfreeze_epoch:
+                target_blocks = self.backbone_mid_trainable_blocks
+            else:
+                target_blocks = self.backbone_trainable_blocks
+
+        return self.set_trainable_backbone_blocks(trainable_blocks=target_blocks)
 
     def _make_pair_features(self, obs_feat: torch.Tensor, goal_feat: torch.Tensor) -> torch.Tensor:
         return torch.cat(
@@ -285,6 +456,7 @@ class NoMaD_Mamba(nn.Module):
     ) -> torch.Tensor:
         goal_encoding = _extract_features(self.goal_encoder, goal_img)
         goal_encoding = self.compress_goal_enc(goal_encoding)
+        goal_encoding = self.goal_adapter(goal_encoding)
         pair_features = self._make_pair_features(current_obs_token, goal_encoding)
         goal_gate = torch.sigmoid(self.goal_gate(pair_features))
         goal_delta = self.goal_delta(pair_features)
@@ -333,6 +505,7 @@ class NoMaD_Mamba(nn.Module):
         # 使用统一的特征提取函数
         obs_encoding = _extract_features(self.obs_encoder, obs_stack)
         obs_encoding = self.compress_obs_enc(obs_encoding)
+        obs_encoding = self.obs_adapter(obs_encoding)
 
         # 形状恢复为 [B, context_size+1, C]，并拼接 goal token 得到序列
         obs_encoding = obs_encoding.unsqueeze(1)

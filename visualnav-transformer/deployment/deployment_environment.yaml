@@ -16,3 +16,4 @@ dependencies:
   - efficientnet_pytorch
   - warmup_scheduler
   - diffusers==0.11.1
+  - timm

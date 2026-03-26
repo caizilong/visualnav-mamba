@@ -17,6 +17,48 @@ from torchvision import transforms
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel
 
+
+def _unwrap_model(model: nn.Module) -> nn.Module:
+    return model.module if hasattr(model, "module") else model
+
+
+def _apply_nomad_backbone_schedule(
+    model: nn.Module,
+    epoch: int,
+    use_wandb: bool = True,
+    force_log: bool = False,
+) -> None:
+    raw_model = _unwrap_model(model)
+    vision_encoder = getattr(raw_model, "vision_encoder", None)
+    if vision_encoder is None or not hasattr(vision_encoder, "apply_backbone_unfreeze_schedule"):
+        return
+
+    schedule_info = vision_encoder.apply_backbone_unfreeze_schedule(epoch)
+    if not schedule_info.get("changed", False) and not force_log:
+        return
+
+    trainable_blocks = schedule_info["trainable_blocks"]
+    total_blocks = schedule_info["total_blocks"]
+    trainable_params_m = schedule_info["trainable_backbone_params"] / 1e6
+    total_params_m = schedule_info["total_backbone_params"] / 1e6
+    print(
+        "Backbone freeze schedule:"
+        f" epoch={epoch}, trainable_blocks={trainable_blocks}/{total_blocks},"
+        f" trainable_backbone_params={trainable_params_m:.2f}M/{total_params_m:.2f}M"
+    )
+    if use_wandb:
+        wandb.log(
+            {
+                "epoch": epoch,
+                "backbone_trainable_blocks": trainable_blocks,
+                "backbone_total_blocks": total_blocks,
+                "backbone_trainable_params_m": trainable_params_m,
+                "backbone_total_params_m": total_params_m,
+            },
+            commit=False,
+        )
+
+
 def train_eval_loop(
     train_model: bool,
     model: nn.Module,
@@ -203,6 +245,12 @@ def train_eval_loop_nomad(
     ema_model = EMAModel(model=model,power=0.75)
     
     for epoch in range(current_epoch, current_epoch + epochs):
+        _apply_nomad_backbone_schedule(
+            model=model,
+            epoch=epoch,
+            use_wandb=use_wandb,
+            force_log=(epoch == current_epoch),
+        )
         if train_model:
             print(
             f"Start ViNT DP Training Epoch {epoch}/{current_epoch + epochs - 1}"

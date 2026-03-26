@@ -24,6 +24,7 @@ dependencies:
   - efficientnet-pytorch
   - warmup-scheduler
   - diffusers==0.11.1
+  - timm
   - lmdb 
   - vit-pytorch
   - positional-encodings
@@ -31,5 +32,4 @@ dependencies:
 
 
   
-
 
