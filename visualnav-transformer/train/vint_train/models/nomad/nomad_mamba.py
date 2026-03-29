@@ -10,10 +10,11 @@ from .nomad_vint import replace_bn_with_gn
 from .mamba2 import Mamba2, MambaConfig
 
 
+# timm / HF 上权重名使用 lvd1689m（无下划线）；旧版误写 lvd_1689m 会导致 Invalid pretrained tag
 TIMM_MODEL_ALIASES = {
-    "vit_small_patch16_dinov3": "vit_small_patch16_dinov3.lvd_1689m",
-    "vit_base_patch16_dinov3": "vit_base_patch16_dinov3.lvd_1689m",
-    "vit_large_patch16_dinov3": "vit_large_patch16_dinov3.lvd_1689m",
+    "vit_small_patch16_dinov3": "vit_small_patch16_dinov3.lvd1689m",
+    "vit_base_patch16_dinov3": "vit_base_patch16_dinov3.lvd1689m",
+    "vit_large_patch16_dinov3": "vit_large_patch16_dinov3.lvd1689m",
 }
 
 

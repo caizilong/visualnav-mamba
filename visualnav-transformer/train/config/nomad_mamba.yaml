@@ -5,17 +5,17 @@ run_name: nomad_mamba
 use_wandb: True                           # 是否启用 wandb
 train: True
 batch_size: 128
-eval_batch_size: 64                       # 评估时使用较小的batch_size以避免OOM
-epochs: 150
+eval_batch_size: 128                       # 评估时使用较小的batch_size以避免OOM
+epochs: 100
 gpu_ids: [0]
 num_workers: 12
-lr: 1e-4
+lr: 5e-5
 optimizer: adamw
 clipping: False
 max_norm: 1.
 scheduler: "cosine"
 warmup: True
-warmup_epochs: 4
+warmup_epochs: 3
 cyclic_period: 10
 plateau_patience: 3
 plateau_factor: 0.5
@@ -42,7 +42,7 @@ adapter_scale: 0.1                        # 小尺度残差注入，先保守利
 freeze_backbone: true                     # 先冻结主干，只训练 adapter + 融合层 + Mamba + diffusion heads
 backbone_trainable_blocks: 4              # 最终只微调 ViT 最后 4 个 block
 backbone_mid_trainable_blocks: 2          # 中间阶段先只解冻最后 2 个 block
-backbone_unfreeze_epochs: [4, 12]         # epoch <4 冻结全部，4~11 解冻 2 层，12+ 解冻 4 层
+backbone_unfreeze_epochs: [5, 15]         # epoch <4 冻结全部，4~11 解冻 2 层，12+ 解冻 4 层
 bidirectional_mamba: true               # 前向/反向 Mamba 同时建模，让 goal 信息反向传播到上下文
 goal_fusion_hidden_dim: 768             # 目标门控融合 MLP 的隐藏维度（= 2 * encoding_size）
 attn_unet: False
@@ -66,7 +66,7 @@ mamba_use_mem_eff_path: true
 num_diffusion_iters: 10
 
 # ---------------- 目标 mask 相关 ----------------
-goal_mask_prob: 0.9
+goal_mask_prob: 0.5
 
 # ---------------- 动作空间归一化 ----------------
 normalize: True
@@ -78,7 +78,7 @@ goal_guidance_power: 1.5                 # 非线性调度，后段更快增强 
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal
-context_size: 8                           # 提高到 8 帧历史，放大 Mamba2 的长程建模优势
+context_size: 4                           # 提高到 8 帧历史，放大 Mamba2 的长程建模优势
 alpha: 1e-4                               # 与原 NoMaD 相同：距离损失权重很小
 
 # ---------------- 距离 / 动作 标签范围 ----------------
@@ -94,15 +94,15 @@ len_traj_pred: 8
 learn_angle: False
 
 # ---------------- 数据集设置 ----------------
-image_size: [96, 96]                      # [宽, 高]，必须能被 patch_size 整除，96/16=6 ✓
+image_size: [160, 160]                      # [宽, 高]，必须能被 patch_size 整除，96/16=6 ✓
 datasets:
-  carla_dataset:
-    data_folder: /workspace/datasets/carla_dataset
-    train: vint_train/data/data_splits/carla_dataset/train/
-    test: vint_train/data/data_splits/carla_dataset/test/
-    end_slack: 1 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
-    goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
-    negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略  
+  # carla_dataset:
+  #   data_folder: /workspace/datasets/carla_dataset
+  #   train: vint_train/data/data_splits/carla_dataset/train/
+  #   test: vint_train/data/data_splits/carla_dataset/test/
+  #   end_slack: 1 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
+  #   goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
+  #   negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略  
   # go_stanford:
   #   data_folder: /workspace/datasets/go_stanford
   #   train: vint_train/data/data_splits/go_stanford/train/
@@ -110,13 +110,13 @@ datasets:
   #   end_slack: 0 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
   #   goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
   #   negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略
-  # recon:
-  #   data_folder: /workspace/datasets/recon
-  #   train: vint_train/data/data_splits/recon/train/ # path to train folder with traj_names.txt
-  #   test: vint_train/data/data_splits/recon/test/ # path to test folder with traj_names.txt
-  #   end_slack: 3 # because many trajectories end in collisions
-  #   goals_per_obs: 1 # how many goals are sampled per observation
-  #   negative_mining: True # negative mining from the ViNG paper (Shah et al.)
+  recon:
+    data_folder: /workspace/datasets/recon
+    train: vint_train/data/data_splits/recon/train/ # path to train folder with traj_names.txt
+    test: vint_train/data/data_splits/recon/test/ # path to test folder with traj_names.txt
+    end_slack: 3 # because many trajectories end in collisions
+    goals_per_obs: 1 # how many goals are sampled per observation
+    negative_mining: True # negative mining from the ViNG paper (Shah et al.)
   # recon:
   #   data_folder: /home/<username>/nomad_dataset/recon
   #   train: /home/<username>/data_splits/recon/train/
@@ -155,10 +155,12 @@ datasets:
   # 如有其它私有数据集，可按需仿照上面格式添加
 
 # ---------------- 日志与评估配置 ----------------
-print_log_freq: 100
+# print_log_freq: 每隔多少个 batch 在终端打印一次（含详细 logger）
+# wandb_log_freq: 每隔多少个 batch 上传标量到 wandb（越大越省流量/日志量；0=关闭 wandb 标量）
+print_log_freq: 200
 image_log_freq: 0                      # 关闭图像上传（最省流量）
 num_images_log: 8
 pairwise_test_freq: 0
 eval_fraction: 0.25
-wandb_log_freq: 100                    # 每 500 个 batch 上传一次标量日志
+wandb_log_freq: 200                    # 与 print 类似或更大，避免过于频繁
 eval_freq: 1

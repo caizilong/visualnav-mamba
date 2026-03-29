@@ -1,3 +1,4 @@
+import gc
 import numpy as np
 import os
 import pickle
@@ -144,31 +145,45 @@ class ViNT_Dataset(Dataset):
             f"dataset_{self.dataset_name}_{img_w}x{img_h}.lmdb",
         )
 
-        # Load all the trajectories into memory. These should already be loaded, but just in case.
-        for traj_name in self.traj_names:
-            self._get_trajectory(traj_name)
-
         """
         If the cache file doesn't exist, create it by iterating through the dataset,
         pre-resize images to target size, and writing to the cache.
         """
         if not os.path.exists(cache_filename):
-            from PIL import Image
+            # 构建图像缓存不需要整条轨迹数据；若 _build_index 已把所有 traj 放进
+            # trajectory_cache，与单次超长 LMDB 写事务叠加易导致 OOM。此处清空，训练时
+            # 再按需 _get_trajectory 从磁盘加载。
+            self.trajectory_cache.clear()
+            gc.collect()
+
             tqdm_iterator = tqdm.tqdm(
                 self.goals_index,
                 disable=not use_tqdm,
                 dynamic_ncols=True,
                 desc=f"Building LMDB cache for {self.dataset_name} (pre-resizing to {img_w}x{img_h})"
             )
+            # 单次 write 事务会持有大量脏页在内存中直到 commit；分批 commit 可限制峰值内存。
+            commit_every = 2048
             with lmdb.open(cache_filename, map_size=2**40) as image_cache:
-                with image_cache.begin(write=True) as txn:
-                    for traj_name, time in tqdm_iterator:
+                txn = image_cache.begin(write=True)
+                try:
+                    for i, (traj_name, time) in enumerate(tqdm_iterator):
                         image_path = get_data_path(self.data_folder, traj_name, time)
-                        # 预先 resize 图片到目标尺寸并保存
                         resized_tensor = img_path_to_data(image_path, self.image_size)
-                        # 将 tensor 序列化保存到 LMDB
                         tensor_bytes = pickle.dumps(resized_tensor)
                         txn.put(image_path.encode(), tensor_bytes)
+                        del resized_tensor, tensor_bytes
+                        if (i + 1) % commit_every == 0:
+                            txn.commit()
+                            txn = image_cache.begin(write=True)
+                            gc.collect()
+                    txn.commit()
+                except BaseException:
+                    try:
+                        txn.abort()
+                    except Exception:
+                        pass
+                    raise
 
         # Reopen the cache file in read-only mode
         self._image_cache: lmdb.Environment = lmdb.open(cache_filename, readonly=True)
@@ -181,8 +196,11 @@ class ViNT_Dataset(Dataset):
         goals_index = []
 
         for traj_name in tqdm.tqdm(self.traj_names, disable=not use_tqdm, dynamic_ncols=True):
-            traj_data = self._get_trajectory(traj_name)
+            # 直接从磁盘读取 traj 长度，避免 _get_trajectory 把所有轨迹常驻内存导致 OOM
+            with open(os.path.join(self.data_folder, traj_name, "traj_data.pkl"), "rb") as f:
+                traj_data = pickle.load(f)
             traj_len = len(traj_data["position"])
+            del traj_data
 
             for goal_time in range(0, traj_len):
                 goals_index.append((traj_name, goal_time))

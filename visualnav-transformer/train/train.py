@@ -1,4 +1,6 @@
 import os
+import atexit
+import gc
 import wandb
 import argparse
 import numpy as np
@@ -42,6 +44,25 @@ from vint_train.training.train_eval_loop import (
     train_eval_loop_nomad,
     load_model,
 )
+
+
+def _shutdown_dataloader_workers(loader):
+    """
+    显式关闭 DataLoader 的 worker 进程，避免进程退出时 multiprocessing resource_tracker
+    报告 leaked semaphore（常见于 num_workers>0 且 persistent_workers=True）。
+    """
+    if loader is None:
+        return
+    try:
+        it = getattr(loader, "_iterator", None)
+        if it is not None and hasattr(it, "_shutdown_workers"):
+            it._shutdown_workers()
+    except Exception:
+        pass
+    try:
+        loader._iterator = None
+    except Exception:
+        pass
 
 
 def main(config):
@@ -151,6 +172,14 @@ def main(config):
             num_workers=0,
             drop_last=False,
         )
+
+    def _training_cleanup():
+        _shutdown_dataloader_workers(train_loader)
+        for _loader in test_dataloaders.values():
+            _shutdown_dataloader_workers(_loader)
+        gc.collect()
+
+    atexit.register(_training_cleanup)
 
     # Create the model
     if config["model_type"] == "gnm":
@@ -380,6 +409,9 @@ def main(config):
             eval_freq=config["eval_freq"],
         )
 
+    # 在打印结束前显式关闭 worker，避免仅依赖 atexit 时仍出现 semaphore 泄漏提示
+    _training_cleanup()
+
     print("FINISHED TRAINING")
 
 
@@ -420,11 +452,22 @@ if __name__ == "__main__":
 
     if config["use_wandb"]:
         wandb.login()
+        # 与下方 torch.multiprocessing.set_start_method("spawn") 一致，避免 fork/spawn 混用导致
+        # multiprocessing 资源（含 semaphore）回收异常。
         wandb.init(
             project=config["project_name"],
-            settings=wandb.Settings(start_method="fork"),
+            settings=wandb.Settings(start_method="spawn"),
             entity="coisinic243-beijing-university-of-technology", # TODO: change this to your wandb entity
         )
+
+        def _wandb_finish_atexit():
+            try:
+                wandb.finish()
+            except Exception:
+                pass
+
+        atexit.register(_wandb_finish_atexit)
+
         wandb.define_metric("epoch")
         wandb.define_metric("*", step_metric="epoch")
         wandb.save(args.config, policy="now")  # save the config file
