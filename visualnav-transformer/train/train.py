@@ -92,7 +92,7 @@ def main(config):
         torch.manual_seed(config["seed"])
         cudnn.deterministic = True
 
-    cudnn.benchmark = True  # good if input sizes don't vary
+    cudnn.benchmark = not cudnn.deterministic
     transform = ([
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
@@ -158,7 +158,7 @@ def main(config):
         shuffle=True,
         num_workers=config["num_workers"],
         drop_last=False,
-        persistent_workers=True,
+        persistent_workers=config["num_workers"] > 0,
     )
 
     if "eval_batch_size" not in config:
@@ -168,7 +168,7 @@ def main(config):
         test_dataloaders[dataset_type] = DataLoader(
             dataset,
             batch_size=config["eval_batch_size"],
-            shuffle=True,
+            shuffle=False,
             num_workers=0,
             drop_last=False,
         )
@@ -341,13 +341,25 @@ def main(config):
             )
 
     current_epoch = 0
+    latest_checkpoint = None
+    resume_checkpoint = None
     if "load_run" in config:
         load_project_folder = os.path.join("logs", config["load_run"])
         print("Loading model from ", load_project_folder)
         latest_path = os.path.join(load_project_folder, "latest.pth")
-        latest_checkpoint = torch.load(latest_path) #f"cuda:{}" if torch.cuda.is_available() else "cpu")
+        if config["model_type"] == "nomad":
+            training_latest_path = os.path.join(load_project_folder, "training_latest.pth")
+            if os.path.exists(training_latest_path):
+                latest_path = training_latest_path
+        latest_checkpoint = torch.load(latest_path, map_location="cpu")
+        if (
+            config["model_type"] == "nomad"
+            and isinstance(latest_checkpoint, dict)
+            and ("model_state_dict" in latest_checkpoint or "ema_state_dict" in latest_checkpoint)
+        ):
+            resume_checkpoint = latest_checkpoint
         load_model(model, config["model_type"], latest_checkpoint)
-        if "epoch" in latest_checkpoint:
+        if isinstance(latest_checkpoint, dict) and "epoch" in latest_checkpoint:
             current_epoch = latest_checkpoint["epoch"] + 1
 
     # Multi-GPU
@@ -356,10 +368,37 @@ def main(config):
     model = model.to(device)
 
     if "load_run" in config:  # load optimizer and scheduler after data parallel
-        if "optimizer" in latest_checkpoint:
-            optimizer.load_state_dict(latest_checkpoint["optimizer"].state_dict())
-        if scheduler is not None and "scheduler" in latest_checkpoint:
-            scheduler.load_state_dict(latest_checkpoint["scheduler"].state_dict())
+        def _resolve_state_dict(checkpoint_entry):
+            if checkpoint_entry is None:
+                return None
+            if hasattr(checkpoint_entry, "state_dict"):
+                return checkpoint_entry.state_dict()
+            return checkpoint_entry
+
+        optimizer_state = None
+        scheduler_state = None
+        if isinstance(latest_checkpoint, dict):
+            optimizer_state = _resolve_state_dict(
+                latest_checkpoint.get("optimizer_state_dict", latest_checkpoint.get("optimizer"))
+            )
+            scheduler_state = _resolve_state_dict(
+                latest_checkpoint.get("scheduler_state_dict", latest_checkpoint.get("scheduler"))
+            )
+
+        if config["model_type"] == "nomad":
+            if optimizer_state is None:
+                optimizer_latest_path = os.path.join(load_project_folder, "optimizer_latest.pth")
+                if os.path.exists(optimizer_latest_path):
+                    optimizer_state = torch.load(optimizer_latest_path, map_location="cpu")
+            if scheduler is not None and scheduler_state is None:
+                scheduler_latest_path = os.path.join(load_project_folder, "scheduler_latest.pth")
+                if os.path.exists(scheduler_latest_path):
+                    scheduler_state = torch.load(scheduler_latest_path, map_location="cpu")
+
+        if optimizer_state is not None:
+            optimizer.load_state_dict(optimizer_state)
+        if scheduler is not None and scheduler_state is not None:
+            scheduler.load_state_dict(scheduler_state)
 
     # ---------- 进入统一的训练 / 评估循环 ----------
     if config["model_type"] == "vint" or config["model_type"] == "gnm": 
@@ -407,6 +446,7 @@ def main(config):
             use_wandb=config["use_wandb"],
             eval_fraction=config["eval_fraction"],
             eval_freq=config["eval_freq"],
+            resume_checkpoint=resume_checkpoint,
         )
 
     # 在打印结束前显式关闭 worker，避免仅依赖 atexit 时仍出现 semaphore 泄漏提示

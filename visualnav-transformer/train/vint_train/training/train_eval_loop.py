@@ -214,6 +214,7 @@ def train_eval_loop_nomad(
     use_wandb: bool = True,
     eval_fraction: float = 0.25,
     eval_freq: int = 1,
+    resume_checkpoint: Optional[dict] = None,
 ):
     """
     NoMaD（基于 diffusion policy）模型的训练 + 评估循环。
@@ -245,7 +246,11 @@ def train_eval_loop_nomad(
         eval_freq: 每多少个 epoch 进行一次评估
     """
     latest_path = os.path.join(project_folder, f"latest.pth")
+    training_latest_path = os.path.join(project_folder, "training_latest.pth")
     ema_model = EMAModel(model=model,power=0.75)
+    if isinstance(resume_checkpoint, dict) and "ema_state_dict" in resume_checkpoint:
+        load_ema_model(ema_model, resume_checkpoint["ema_state_dict"])
+        print("Loaded EMA state from training checkpoint")
     
     for epoch in range(current_epoch, current_epoch + epochs):
         _apply_nomad_backbone_schedule(
@@ -276,7 +281,8 @@ def train_eval_loop_nomad(
                 use_wandb=use_wandb,
                 alpha=alpha,
             )
-            lr_scheduler.step()
+            if lr_scheduler is not None:
+                lr_scheduler.step()
 
         ema_epoch_path = os.path.join(project_folder, f"ema_{epoch}.pth")
         ema_latest_path = os.path.join(project_folder, "ema_latest.pth")
@@ -285,21 +291,35 @@ def train_eval_loop_nomad(
         print(f"Saved EMA model to {ema_epoch_path} and {ema_latest_path}")
 
         model_epoch_path = os.path.join(project_folder, f"{epoch}.pth")
-        torch.save(model.state_dict(), model_epoch_path)
-        torch.save(model.state_dict(), latest_path)
+        raw_model = _unwrap_model(model)
+        model_state_dict = raw_model.state_dict()
+        torch.save(model_state_dict, model_epoch_path)
+        torch.save(model_state_dict, latest_path)
         print(f"Saved model to {model_epoch_path}")
 
+        training_state = {
+            "epoch": epoch,
+            "model_state_dict": model_state_dict,
+            "ema_state_dict": ema_model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": lr_scheduler.state_dict() if lr_scheduler is not None else None,
+            "backbone_trainable_blocks": getattr(
+                getattr(raw_model, "vision_encoder", None),
+                "_current_trainable_backbone_blocks",
+                None,
+            ),
+        }
+        torch.save(training_state, training_latest_path)
+        print(f"Saved training state to {training_latest_path}")
+
         # save optimizer
-        optimizer_epoch_path = os.path.join(project_folder, f"optimizer_{epoch}.pth")
         latest_optimizer_path = os.path.join(project_folder, "optimizer_latest.pth")
-        torch.save(optimizer.state_dict(), optimizer_epoch_path)
         torch.save(optimizer.state_dict(), latest_optimizer_path)
 
         # save scheduler
-        scheduler_epoch_path = os.path.join(project_folder, f"scheduler_{epoch}.pth")
-        latest_scheduler_path = os.path.join(project_folder, "scheduler_latest.pth")
-        torch.save(lr_scheduler.state_dict(), scheduler_epoch_path)
-        torch.save(lr_scheduler.state_dict(), latest_scheduler_path)
+        if lr_scheduler is not None:
+            latest_scheduler_path = os.path.join(project_folder, "scheduler_latest.pth")
+            torch.save(lr_scheduler.state_dict(), latest_scheduler_path)
 
 
         if (epoch + 1) % eval_freq == 0: 
@@ -340,7 +360,10 @@ def train_eval_loop_nomad(
 def load_model(model, model_type, checkpoint: dict) -> None:
     """Load model from checkpoint."""
     if model_type == "nomad":
-        state_dict = checkpoint
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        else:
+            state_dict = checkpoint
         model.load_state_dict(state_dict, strict=False)
     else:
         loaded_model = checkpoint["model"]

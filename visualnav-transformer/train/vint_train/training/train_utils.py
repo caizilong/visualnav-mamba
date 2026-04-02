@@ -282,7 +282,7 @@ def train(
         action_label = action_label.to(device)
         action_mask = action_mask.to(device)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
       
         dist_pred, action_pred = model_outputs
 
@@ -702,7 +702,7 @@ def train_nomad(
             loss = alpha * dist_loss + (1-alpha) * diffusion_loss
 
             # 反向传播并更新参数
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
 
@@ -822,12 +822,9 @@ def evaluate_nomad(
     goal_mask_prob = torch.clip(torch.tensor(goal_mask_prob), 0, 1)
     ema_model = ema_model.averaged_model
     ema_model.eval()
-    
-    # 清理CUDA缓存，防止内存碎片化
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    
     num_batches = len(dataloader)
+    eval_generator = torch.Generator()
+    eval_generator.manual_seed(0)
 
     uc_action_loss_logger = Logger("uc_action_loss", eval_type, window_size=print_log_freq)
     uc_action_waypts_cos_sim_logger = Logger(
@@ -855,7 +852,7 @@ def evaluate_nomad(
     }
     num_batches = max(int(num_batches * eval_fraction), 1)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         with tqdm.tqdm(
             itertools.islice(dataloader, num_batches), 
             total=num_batches, 
@@ -884,7 +881,9 @@ def evaluate_nomad(
                 B = actions.shape[0]
 
                 # Generate random goal mask
-                rand_goal_mask = (torch.rand((B,)) < goal_mask_prob).long().to(device)
+                rand_goal_mask = (
+                    torch.rand((B,), generator=eval_generator) < goal_mask_prob
+                ).long().to(device)
                 goal_mask = torch.ones_like(rand_goal_mask).long().to(device)
                 no_mask = torch.zeros_like(rand_goal_mask).long().to(device)
 
@@ -1064,6 +1063,8 @@ def model_output(
     guidance_scale_max: float = 1.75,
     guidance_scale_power: float = 1.5,
 ):
+    noise_scheduler.set_timesteps(noise_scheduler.config.num_train_timesteps)
+
     goal_mask = torch.ones((batch_goal_images.shape[0],)).long().to(device)
     obs_cond = model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=goal_mask)
     # obs_cond = obs_cond.flatten(start_dim=1)

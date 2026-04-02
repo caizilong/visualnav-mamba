@@ -129,7 +129,10 @@ def load_model(
     
     checkpoint = torch.load(model_path, map_location=device)
     if model_type == "nomad":
-        state_dict = checkpoint
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        else:
+            state_dict = checkpoint
         model.load_state_dict(state_dict, strict=False)
     else:
         loaded_model = checkpoint["model"]
