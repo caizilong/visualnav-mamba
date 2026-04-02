@@ -598,6 +598,8 @@ def train_nomad(
     model.train()
     num_batches = len(dataloader)
 
+    ema_eval_model = ema_model.averaged_model
+
     uc_action_loss_logger = Logger("uc_action_loss", "train", window_size=print_log_freq)
     uc_action_waypts_cos_sim_logger = Logger(
         "uc_action_waypts_cos_sim", "train", window_size=print_log_freq
@@ -710,22 +712,32 @@ def train_nomad(
             # Logging
             loss_cpu = loss.item()
             tepoch.set_postfix(loss=loss_cpu)
-            wandb.log({"epoch": epoch, "total_loss": loss_cpu})
-            wandb.log({"epoch": epoch, "dist_loss": dist_loss.item()})
-            wandb.log({"epoch": epoch, "diffusion_loss": diffusion_loss.item()})
+            wandb_payload = None
+            if use_wandb and wandb_log_freq != 0 and i % wandb_log_freq == 0:
+                wandb_payload = {
+                    "epoch": epoch,
+                    "total_loss": loss_cpu,
+                    "dist_loss": dist_loss.item(),
+                    "diffusion_loss": diffusion_loss.item(),
+                }
 
 
             if i % print_log_freq == 0:
-                losses = _compute_losses_nomad(
-                            ema_model.averaged_model,
-                            noise_scheduler,
-                            batch_obs_images,
-                            batch_goal_images,
-                            distance.to(device),
-                            actions.to(device),
-                            device,
-                            action_mask.to(device),
-                        )
+                ema_was_training = ema_eval_model.training
+                ema_eval_model.eval()
+                with torch.inference_mode():
+                    losses = _compute_losses_nomad(
+                                ema_eval_model,
+                                noise_scheduler,
+                                batch_obs_images,
+                                batch_goal_images,
+                                distance.to(device),
+                                actions.to(device),
+                                device,
+                                action_mask.to(device),
+                            )
+                if ema_was_training:
+                    ema_eval_model.train()
                 
                 for key, value in losses.items():
                     if key in loggers:
@@ -738,30 +750,36 @@ def train_nomad(
                     if i % print_log_freq == 0 and print_log_freq != 0:
                         print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
 
-                if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-                    wandb_data_log = {"epoch": epoch}
-                    wandb_data_log.update(data_log)
-                    wandb.log(wandb_data_log, commit=True)
+                if wandb_payload is not None:
+                    wandb_payload.update(data_log)
+
+            if wandb_payload is not None:
+                wandb.log(wandb_payload, commit=True)
 
             if image_log_freq != 0 and i % image_log_freq == 0:
-                visualize_diffusion_action_distribution(
-                    ema_model.averaged_model,
-                    noise_scheduler,
-                    batch_obs_images,
-                    batch_goal_images,
-                    batch_viz_obs_images,
-                    batch_viz_goal_images,
-                    actions,
-                    distance,
-                    goal_pos,
-                    device,
-                    "train",
-                    project_folder,
-                    epoch,
-                    num_images_log,
-                    30,
-                    use_wandb,
-                )
+                ema_was_training = ema_eval_model.training
+                ema_eval_model.eval()
+                with torch.inference_mode():
+                    visualize_diffusion_action_distribution(
+                        ema_eval_model,
+                        noise_scheduler,
+                        batch_obs_images,
+                        batch_goal_images,
+                        batch_viz_obs_images,
+                        batch_viz_goal_images,
+                        actions,
+                        distance,
+                        goal_pos,
+                        device,
+                        "train",
+                        project_folder,
+                        epoch,
+                        num_images_log,
+                        30,
+                        use_wandb,
+                    )
+                if ema_was_training:
+                    ema_eval_model.train()
 
 
 def evaluate_nomad(
@@ -921,9 +939,14 @@ def evaluate_nomad(
                 loss_cpu = rand_mask_loss.item()
                 tepoch.set_postfix(loss=loss_cpu)
 
-                wandb.log({"epoch": epoch, "diffusion_eval_loss (random masking)": rand_mask_loss})
-                wandb.log({"epoch": epoch, "diffusion_eval_loss (no masking)": no_mask_loss})
-                wandb.log({"epoch": epoch, "diffusion_eval_loss (goal masking)": goal_mask_loss})
+                wandb_payload = None
+                if use_wandb and wandb_log_freq != 0 and i % wandb_log_freq == 0:
+                    wandb_payload = {
+                        "epoch": epoch,
+                        "diffusion_eval_loss (random masking)": rand_mask_loss.item(),
+                        "diffusion_eval_loss (no masking)": no_mask_loss.item(),
+                        "diffusion_eval_loss (goal masking)": goal_mask_loss.item(),
+                    }
 
                 if i % print_log_freq == 0 and print_log_freq != 0:
                     losses = _compute_losses_nomad(
@@ -948,10 +971,11 @@ def evaluate_nomad(
                         if i % print_log_freq == 0 and print_log_freq != 0:
                             print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
 
-                    if use_wandb and i % wandb_log_freq == 0 and wandb_log_freq != 0:
-                        wandb_data_log = {"epoch": epoch}
-                        wandb_data_log.update(data_log)
-                        wandb.log(wandb_data_log, commit=True)
+                    if wandb_payload is not None:
+                        wandb_payload.update(data_log)
+
+                if wandb_payload is not None:
+                    wandb.log(wandb_payload, commit=True)
 
                 if image_log_freq != 0 and i % image_log_freq == 0:
                     visualize_diffusion_action_distribution(

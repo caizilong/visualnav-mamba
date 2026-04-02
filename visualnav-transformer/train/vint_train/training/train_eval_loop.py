@@ -167,7 +167,8 @@ def train_eval_loop(
             "scheduler": scheduler
         }
         # log average eval loss
-        wandb.log({"epoch": epoch}, commit=False)
+        if use_wandb:
+            wandb.log({"epoch": epoch}, commit=False)
 
         if scheduler is not None:
             # scheduler calls based on the type of scheduler
@@ -175,18 +176,20 @@ def train_eval_loop(
                 scheduler.step(np.mean(avg_total_test_loss))
             else:
                 scheduler.step()
-        wandb.log({
-            "epoch": epoch,
-            "avg_total_test_loss": np.mean(avg_total_test_loss),
-            "lr": optimizer.param_groups[0]["lr"],
-        }, commit=False)
+        if use_wandb:
+            wandb.log({
+                "epoch": epoch,
+                "avg_total_test_loss": np.mean(avg_total_test_loss),
+                "lr": optimizer.param_groups[0]["lr"],
+            }, commit=False)
 
         numbered_path = os.path.join(project_folder, f"{epoch}.pth")
         torch.save(checkpoint, latest_path)
         torch.save(checkpoint, numbered_path)  # keep track of model at every epoch
 
     # Flush the last set of eval logs
-    wandb.log({"epoch": current_epoch + epochs - 1})
+    if use_wandb:
+        wandb.log({"epoch": current_epoch + epochs - 1})
     print()
 
 def train_eval_loop_nomad(
@@ -322,14 +325,16 @@ def train_eval_loop_nomad(
                     use_wandb=use_wandb,
                     eval_fraction=eval_fraction,
                 )
-        wandb.log({
-            "epoch": epoch,
-            "lr": optimizer.param_groups[0]["lr"],
-        }, commit=False)
+        if use_wandb:
+            wandb.log({
+                "epoch": epoch,
+                "lr": optimizer.param_groups[0]["lr"],
+            }, commit=False)
 
         
     # Flush the last set of eval logs
-    wandb.log({"epoch": current_epoch + epochs - 1})
+    if use_wandb:
+        wandb.log({"epoch": current_epoch + epochs - 1})
     print()
 
 def load_model(model, model_type, checkpoint: dict) -> None:
