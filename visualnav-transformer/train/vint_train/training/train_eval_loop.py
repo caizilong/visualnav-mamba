@@ -1,6 +1,7 @@
 import wandb
 import os
 import numpy as np
+import copy
 from typing import List, Optional, Dict
 from prettytable import PrettyTable
 
@@ -20,6 +21,41 @@ from diffusers.training_utils import EMAModel
 
 def _unwrap_model(model: nn.Module) -> nn.Module:
     return model.module if hasattr(model, "module") else model
+
+
+def _ema_device(ema_model: EMAModel) -> torch.device:
+    averaged_model = _unwrap_model(ema_model.averaged_model)
+    try:
+        return next(averaged_model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
+def serialize_ema_model(ema_model: EMAModel) -> dict:
+    state = {
+        "averaged_model": _unwrap_model(ema_model.averaged_model).state_dict(),
+    }
+
+    if hasattr(ema_model, "shadow_params"):
+        state["shadow_params"] = [
+            param.detach().cpu().clone() for param in ema_model.shadow_params
+        ]
+
+    scalar_attrs = [
+        "decay",
+        "min_decay",
+        "optimization_step",
+        "update_after_step",
+        "use_ema_warmup",
+        "inv_gamma",
+        "power",
+        "cur_decay_value",
+    ]
+    for attr_name in scalar_attrs:
+        if hasattr(ema_model, attr_name):
+            state[attr_name] = copy.deepcopy(getattr(ema_model, attr_name))
+
+    return state
 
 
 def _apply_nomad_backbone_schedule(
@@ -286,8 +322,9 @@ def train_eval_loop_nomad(
 
         ema_epoch_path = os.path.join(project_folder, f"ema_{epoch}.pth")
         ema_latest_path = os.path.join(project_folder, "ema_latest.pth")
-        torch.save(ema_model.averaged_model.state_dict(), ema_epoch_path)
-        torch.save(ema_model.averaged_model.state_dict(), ema_latest_path)
+        ema_model_state_dict = _unwrap_model(ema_model.averaged_model).state_dict()
+        torch.save(ema_model_state_dict, ema_epoch_path)
+        torch.save(ema_model_state_dict, ema_latest_path)
         print(f"Saved EMA model to {ema_epoch_path} and {ema_latest_path}")
 
         model_epoch_path = os.path.join(project_folder, f"{epoch}.pth")
@@ -300,7 +337,7 @@ def train_eval_loop_nomad(
         training_state = {
             "epoch": epoch,
             "model_state_dict": model_state_dict,
-            "ema_state_dict": ema_model.state_dict(),
+            "ema_state_dict": serialize_ema_model(ema_model),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": lr_scheduler.state_dict() if lr_scheduler is not None else None,
             "backbone_trainable_blocks": getattr(
@@ -377,7 +414,43 @@ def load_model(model, model_type, checkpoint: dict) -> None:
 
 def load_ema_model(ema_model, state_dict: dict) -> None:
     """Load model from checkpoint."""
-    ema_model.load_state_dict(state_dict)
+    if not isinstance(state_dict, dict):
+        _unwrap_model(ema_model.averaged_model).load_state_dict(state_dict, strict=False)
+        if hasattr(ema_model, "shadow_params"):
+            ema_model.shadow_params = [
+                param.detach().clone()
+                for param in _unwrap_model(ema_model.averaged_model).parameters()
+            ]
+        return
+
+    averaged_model_state = state_dict.get("averaged_model", state_dict)
+    _unwrap_model(ema_model.averaged_model).load_state_dict(averaged_model_state, strict=False)
+
+    device = _ema_device(ema_model)
+    if hasattr(ema_model, "shadow_params"):
+        if "shadow_params" in state_dict:
+            ema_model.shadow_params = [
+                tensor.detach().to(device).clone() for tensor in state_dict["shadow_params"]
+            ]
+        else:
+            ema_model.shadow_params = [
+                param.detach().clone()
+                for param in _unwrap_model(ema_model.averaged_model).parameters()
+            ]
+
+    scalar_attrs = [
+        "decay",
+        "min_decay",
+        "optimization_step",
+        "update_after_step",
+        "use_ema_warmup",
+        "inv_gamma",
+        "power",
+        "cur_decay_value",
+    ]
+    for attr_name in scalar_attrs:
+        if attr_name in state_dict and hasattr(ema_model, attr_name):
+            setattr(ema_model, attr_name, copy.deepcopy(state_dict[attr_name]))
 
 
 def count_parameters(model):
