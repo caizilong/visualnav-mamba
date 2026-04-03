@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Tuple
 
 import timm
 
@@ -175,10 +175,6 @@ class NoMaD_Mamba(nn.Module):
         share_visual_backbone: bool = False,
         adapter_hidden_dim: Optional[int] = None,
         adapter_scale: float = 0.1,
-        freeze_backbone: bool = False,
-        backbone_trainable_blocks: int = 0,
-        backbone_mid_trainable_blocks: Optional[int] = None,
-        backbone_unfreeze_epochs: Optional[Sequence[int]] = None,
     ) -> None:
         super().__init__()
 
@@ -193,20 +189,6 @@ class NoMaD_Mamba(nn.Module):
             else 2 * self.obs_encoding_size
         )
         self.share_visual_backbone = share_visual_backbone
-        self.freeze_backbone = freeze_backbone
-        self.backbone_trainable_blocks = max(int(backbone_trainable_blocks), 0)
-        if backbone_mid_trainable_blocks is None:
-            if self.backbone_trainable_blocks <= 1:
-                backbone_mid_trainable_blocks = self.backbone_trainable_blocks
-            else:
-                backbone_mid_trainable_blocks = max(1, self.backbone_trainable_blocks // 2)
-        self.backbone_mid_trainable_blocks = max(
-            0, min(int(backbone_mid_trainable_blocks), self.backbone_trainable_blocks)
-        )
-        self.backbone_unfreeze_epochs = tuple(
-            sorted(int(epoch) for epoch in (backbone_unfreeze_epochs or []))
-        )[:2]
-        self._current_trainable_backbone_blocks: Optional[int] = None
 
         # 如果未指定 goal_encoder，则使用与 obs_encoder 相同的类型
         if goal_encoder is None:
@@ -350,94 +332,6 @@ class NoMaD_Mamba(nn.Module):
         self.register_buffer("no_mask", no_mask)
         self.register_buffer("all_masks", all_masks)
         self.register_buffer("avg_pool_mask", avg_pool_mask)
-        self.apply_backbone_unfreeze_schedule(epoch=0)
-
-    def _iter_unique_backbones(self):
-        seen = set()
-        for encoder in (self.obs_encoder, self.goal_encoder):
-            encoder_id = id(encoder)
-            if encoder_id in seen:
-                continue
-            seen.add(encoder_id)
-            yield encoder
-
-    def _set_module_trainable(self, module: nn.Module, trainable: bool) -> None:
-        for parameter in module.parameters():
-            parameter.requires_grad = trainable
-
-    def _set_encoder_trainable_blocks(
-        self,
-        encoder: nn.Module,
-        trainable_blocks: int,
-    ) -> int:
-        blocks = getattr(encoder, "blocks", None)
-        if blocks is None:
-            self._set_module_trainable(encoder, trainable_blocks != 0)
-            return 0
-
-        total_blocks = len(blocks)
-        if trainable_blocks < 0 or trainable_blocks >= total_blocks:
-            self._set_module_trainable(encoder, True)
-            return total_blocks
-
-        self._set_module_trainable(encoder, False)
-        if trainable_blocks > 0:
-            for block in blocks[-trainable_blocks:]:
-                self._set_module_trainable(block, True)
-            for attr_name in ("norm", "fc_norm", "head_norm"):
-                if hasattr(encoder, attr_name):
-                    self._set_module_trainable(getattr(encoder, attr_name), True)
-        return total_blocks
-
-    def set_trainable_backbone_blocks(self, trainable_blocks: int) -> dict:
-        total_blocks = 0
-        for encoder in self._iter_unique_backbones():
-            total_blocks = self._set_encoder_trainable_blocks(encoder, trainable_blocks)
-
-        trainable_backbone_params = 0
-        total_backbone_params = 0
-        for encoder in self._iter_unique_backbones():
-            for parameter in encoder.parameters():
-                total_backbone_params += parameter.numel()
-                if parameter.requires_grad:
-                    trainable_backbone_params += parameter.numel()
-
-        actual_trainable_blocks = (
-            total_blocks if trainable_blocks < 0 else min(trainable_blocks, total_blocks)
-        )
-        changed = actual_trainable_blocks != self._current_trainable_backbone_blocks
-        self._current_trainable_backbone_blocks = actual_trainable_blocks
-        return {
-            "changed": changed,
-            "trainable_blocks": actual_trainable_blocks,
-            "total_blocks": total_blocks,
-            "trainable_backbone_params": trainable_backbone_params,
-            "total_backbone_params": total_backbone_params,
-            "shared_backbone": self.share_visual_backbone,
-        }
-
-    def apply_backbone_unfreeze_schedule(self, epoch: int) -> dict:
-        if not self.freeze_backbone:
-            return self.set_trainable_backbone_blocks(trainable_blocks=-1)
-
-        if len(self.backbone_unfreeze_epochs) == 0:
-            target_blocks = self.backbone_trainable_blocks
-        elif len(self.backbone_unfreeze_epochs) == 1:
-            target_blocks = (
-                0
-                if epoch < self.backbone_unfreeze_epochs[0]
-                else self.backbone_trainable_blocks
-            )
-        else:
-            first_unfreeze_epoch, second_unfreeze_epoch = self.backbone_unfreeze_epochs
-            if epoch < first_unfreeze_epoch:
-                target_blocks = 0
-            elif epoch < second_unfreeze_epoch:
-                target_blocks = self.backbone_mid_trainable_blocks
-            else:
-                target_blocks = self.backbone_trainable_blocks
-
-        return self.set_trainable_backbone_blocks(trainable_blocks=target_blocks)
 
     def _make_pair_features(self, obs_feat: torch.Tensor, goal_feat: torch.Tensor) -> torch.Tensor:
         return torch.cat(

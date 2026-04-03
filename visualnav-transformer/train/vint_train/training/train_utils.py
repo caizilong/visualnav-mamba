@@ -478,6 +478,9 @@ def _compute_losses_nomad(
     batch_action_label: torch.Tensor,
     device: torch.device,
     action_mask: torch.Tensor,
+    guidance_scale_min: float = 0.25,
+    guidance_scale_max: float = 1.75,
+    guidance_scale_power: float = 1.5,
 ):
     """
     对 NoMaD 的 EMA 模型进行一次前向推理并计算损失与指标。
@@ -498,6 +501,9 @@ def _compute_losses_nomad(
         action_dim,
         num_samples=1,
         device=device,
+        guidance_scale_min=guidance_scale_min,
+        guidance_scale_max=guidance_scale_max,
+        guidance_scale_power=guidance_scale_power,
     )
     uc_actions = model_output_dict['uc_actions']
     gc_actions = model_output_dict['gc_actions']
@@ -567,6 +573,9 @@ def train_nomad(
     image_log_freq: int = 1000,
     num_images_log: int = 8,
     use_wandb: bool = True,
+    goal_guidance_min: float = 0.25,
+    goal_guidance_max: float = 1.75,
+    goal_guidance_power: float = 1.5,
 ):
     """
     训练 NoMaD 扩散策略模型一个 epoch。
@@ -593,6 +602,7 @@ def train_nomad(
         image_log_freq: 可视化频率
         num_images_log: 可视化时使用的样本数
         use_wandb: 是否记录到 wandb
+        goal_guidance_*: 与配置 goal_guidance_* 一致，用于日志/可视化中的扩散采样
     """
     goal_mask_prob = torch.clip(torch.tensor(goal_mask_prob), 0, 1)
     model.train()
@@ -735,6 +745,9 @@ def train_nomad(
                                 actions.to(device),
                                 device,
                                 action_mask.to(device),
+                                guidance_scale_min=goal_guidance_min,
+                                guidance_scale_max=goal_guidance_max,
+                                guidance_scale_power=goal_guidance_power,
                             )
                 if ema_was_training:
                     ema_eval_model.train()
@@ -777,6 +790,9 @@ def train_nomad(
                         num_images_log,
                         30,
                         use_wandb,
+                        goal_guidance_min=goal_guidance_min,
+                        goal_guidance_max=goal_guidance_max,
+                        goal_guidance_power=goal_guidance_power,
                     )
                 if ema_was_training:
                     ema_eval_model.train()
@@ -798,6 +814,9 @@ def evaluate_nomad(
     num_images_log: int = 8,
     eval_fraction: float = 0.25,
     use_wandb: bool = True,
+    goal_guidance_min: float = 0.25,
+    goal_guidance_max: float = 1.75,
+    goal_guidance_power: float = 1.5,
 ):
     """
     Evaluate the model on the given evaluation dataset.
@@ -957,6 +976,9 @@ def evaluate_nomad(
                                 actions.to(device),
                                 device,
                                 action_mask.to(device),
+                                guidance_scale_min=goal_guidance_min,
+                                guidance_scale_max=goal_guidance_max,
+                                guidance_scale_power=goal_guidance_power,
                             )
                     
                     for key, value in losses.items():
@@ -994,6 +1016,9 @@ def evaluate_nomad(
                         num_images_log,
                         30,
                         use_wandb,
+                        goal_guidance_min=goal_guidance_min,
+                        goal_guidance_max=goal_guidance_max,
+                        goal_guidance_power=goal_guidance_power,
                     )
 
 
@@ -1163,6 +1188,9 @@ def visualize_diffusion_action_distribution(
     num_images_log: int,
     num_samples: int = 30,
     use_wandb: bool = True,
+    goal_guidance_min: float = 0.25,
+    goal_guidance_max: float = 1.75,
+    goal_guidance_power: float = 1.5,
 ):
     """Plot samples from the exploration model."""
 
@@ -1207,6 +1235,9 @@ def visualize_diffusion_action_distribution(
             action_dim,
             num_samples,
             device,
+            guidance_scale_min=goal_guidance_min,
+            guidance_scale_max=goal_guidance_max,
+            guidance_scale_power=goal_guidance_power,
         )
         uc_actions_list.append(to_numpy(model_output_dict['uc_actions']))
         gc_actions_list.append(to_numpy(model_output_dict['gc_actions']))

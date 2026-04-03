@@ -10,7 +10,6 @@ from vint_train.training.train_utils import train_nomad, evaluate_nomad
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim import Adam
 from torchvision import transforms
@@ -56,43 +55,6 @@ def serialize_ema_model(ema_model: EMAModel) -> dict:
             state[attr_name] = copy.deepcopy(getattr(ema_model, attr_name))
 
     return state
-
-
-def _apply_nomad_backbone_schedule(
-    model: nn.Module,
-    epoch: int,
-    use_wandb: bool = True,
-    force_log: bool = False,
-) -> None:
-    raw_model = _unwrap_model(model)
-    vision_encoder = getattr(raw_model, "vision_encoder", None)
-    if vision_encoder is None or not hasattr(vision_encoder, "apply_backbone_unfreeze_schedule"):
-        return
-
-    schedule_info = vision_encoder.apply_backbone_unfreeze_schedule(epoch)
-    if not schedule_info.get("changed", False) and not force_log:
-        return
-
-    trainable_blocks = schedule_info["trainable_blocks"]
-    total_blocks = schedule_info["total_blocks"]
-    trainable_params_m = schedule_info["trainable_backbone_params"] / 1e6
-    total_params_m = schedule_info["total_backbone_params"] / 1e6
-    print(
-        "Backbone freeze schedule:"
-        f" epoch={epoch}, trainable_blocks={trainable_blocks}/{total_blocks},"
-        f" trainable_backbone_params={trainable_params_m:.2f}M/{total_params_m:.2f}M"
-    )
-    if use_wandb:
-        wandb.log(
-            {
-                "epoch": epoch,
-                "backbone_trainable_blocks": trainable_blocks,
-                "backbone_total_blocks": total_blocks,
-                "backbone_trainable_params_m": trainable_params_m,
-                "backbone_total_params_m": total_params_m,
-            },
-            commit=False,
-        )
 
 
 def train_eval_loop(
@@ -231,8 +193,8 @@ def train_eval_loop(
 def train_eval_loop_nomad(
     train_model: bool,
     model: nn.Module,
-    optimizer: Adam, 
-    lr_scheduler: torch.optim.lr_scheduler._LRScheduler,
+    optimizer: Adam,
+    lr_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     noise_scheduler: DDPMScheduler,
     train_loader: DataLoader,
     test_dataloaders: Dict[str, DataLoader],
@@ -251,6 +213,9 @@ def train_eval_loop_nomad(
     eval_fraction: float = 0.25,
     eval_freq: int = 1,
     resume_checkpoint: Optional[dict] = None,
+    goal_guidance_min: float = 0.25,
+    goal_guidance_max: float = 1.75,
+    goal_guidance_power: float = 1.5,
 ):
     """
     NoMaD（基于 diffusion policy）模型的训练 + 评估循环。
@@ -280,21 +245,16 @@ def train_eval_loop_nomad(
         use_wandb: 是否启用 wandb
         eval_fraction: 每轮评估时，使用训练数据子集的比例
         eval_freq: 每多少个 epoch 进行一次评估
+        goal_guidance_min/max/power: 推理采样时 classifier-free guidance 的调度（与配置中 goal_guidance_* 一致）
     """
     latest_path = os.path.join(project_folder, f"latest.pth")
     training_latest_path = os.path.join(project_folder, "training_latest.pth")
-    ema_model = EMAModel(model=model,power=0.75)
+    ema_model = EMAModel(model=model, power=0.75)
     if isinstance(resume_checkpoint, dict) and "ema_state_dict" in resume_checkpoint:
         load_ema_model(ema_model, resume_checkpoint["ema_state_dict"])
         print("Loaded EMA state from training checkpoint")
     
     for epoch in range(current_epoch, current_epoch + epochs):
-        _apply_nomad_backbone_schedule(
-            model=model,
-            epoch=epoch,
-            use_wandb=use_wandb,
-            force_log=(epoch == current_epoch),
-        )
         if train_model:
             print(
             f"Start ViNT DP Training Epoch {epoch}/{current_epoch + epochs - 1}"
@@ -316,6 +276,9 @@ def train_eval_loop_nomad(
                 num_images_log=num_images_log,
                 use_wandb=use_wandb,
                 alpha=alpha,
+                goal_guidance_min=goal_guidance_min,
+                goal_guidance_max=goal_guidance_max,
+                goal_guidance_power=goal_guidance_power,
             )
             if lr_scheduler is not None:
                 lr_scheduler.step()
@@ -340,11 +303,6 @@ def train_eval_loop_nomad(
             "ema_state_dict": serialize_ema_model(ema_model),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": lr_scheduler.state_dict() if lr_scheduler is not None else None,
-            "backbone_trainable_blocks": getattr(
-                getattr(raw_model, "vision_encoder", None),
-                "_current_trainable_backbone_blocks",
-                None,
-            ),
         }
         torch.save(training_state, training_latest_path)
         print(f"Saved training state to {training_latest_path}")
@@ -381,6 +339,9 @@ def train_eval_loop_nomad(
                     image_log_freq=image_log_freq,
                     use_wandb=use_wandb,
                     eval_fraction=eval_fraction,
+                    goal_guidance_min=goal_guidance_min,
+                    goal_guidance_max=goal_guidance_max,
+                    goal_guidance_power=goal_guidance_power,
                 )
         if use_wandb:
             wandb.log({

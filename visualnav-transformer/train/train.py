@@ -6,7 +6,6 @@ import argparse
 import numpy as np
 import yaml
 import time
-import pdb
 
 import torch
 import torch.nn as nn
@@ -17,7 +16,6 @@ import torch.backends.cudnn as cudnn
 from warmup_scheduler import GradualWarmupScheduler
 
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-from diffusers.optimization import get_scheduler
 
 """
 IMPORT YOUR MODEL HERE
@@ -232,10 +230,6 @@ def main(config):
                 share_visual_backbone=config.get("share_visual_backbone", False),
                 adapter_hidden_dim=config.get("adapter_hidden_dim", None),
                 adapter_scale=config.get("adapter_scale", 0.1),
-                freeze_backbone=config.get("freeze_backbone", False),
-                backbone_trainable_blocks=config.get("backbone_trainable_blocks", 0),
-                backbone_mid_trainable_blocks=config.get("backbone_mid_trainable_blocks", None),
-                backbone_unfreeze_epochs=config.get("backbone_unfreeze_epochs", None),
             )
             # 注：_create_timm_encoder 内部已调用 replace_bn_with_gn，无需重复调用
         elif config["vision_encoder"] == "vib":
@@ -279,7 +273,7 @@ def main(config):
             prediction_type='epsilon'
         )
     else:
-        raise ValueError(f"Model {config['model']} not supported")
+        raise ValueError(f"Model type {config['model_type']} not supported")
 
     if config["clipping"]:
         print("Clipping gradients to", config["max_norm"])
@@ -447,6 +441,9 @@ def main(config):
             eval_fraction=config["eval_fraction"],
             eval_freq=config["eval_freq"],
             resume_checkpoint=resume_checkpoint,
+            goal_guidance_min=float(config.get("goal_guidance_min", 0.25)),
+            goal_guidance_max=float(config.get("goal_guidance_max", 1.75)),
+            goal_guidance_power=float(config.get("goal_guidance_power", 1.5)),
         )
 
     # 在打印结束前显式关闭 worker，避免仅依赖 atexit 时仍出现 semaphore 泄漏提示

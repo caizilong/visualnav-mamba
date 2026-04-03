@@ -93,10 +93,6 @@ def load_model(
                 share_visual_backbone=config.get("share_visual_backbone", False),
                 adapter_hidden_dim=config.get("adapter_hidden_dim", None),
                 adapter_scale=config.get("adapter_scale", 0.1),
-                freeze_backbone=config.get("freeze_backbone", False),
-                backbone_trainable_blocks=config.get("backbone_trainable_blocks", 0),
-                backbone_mid_trainable_blocks=config.get("backbone_mid_trainable_blocks", None),
-                backbone_unfreeze_epochs=config.get("backbone_unfreeze_epochs", None),
             )
         elif config["vision_encoder"] == "vit": 
             vision_encoder = ViT(
