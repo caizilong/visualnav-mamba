@@ -30,10 +30,11 @@ from topic_names import (IMAGE_TOPIC,
 
 
 # CONSTANTS: 路径与机器人配置
-TOPOMAP_IMAGES_DIR = "../topomaps/images"   # 预先离线生成的拓扑地图图像目录
-MODEL_WEIGHTS_PATH = "../model_weights"
-ROBOT_CONFIG_PATH ="../config/robot.yaml"
-MODEL_CONFIG_PATH = "../config/models.yaml"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TOPOMAP_IMAGES_DIR = os.path.normpath(os.path.join(BASE_DIR, "../topomaps/images"))   # 预先离线生成的拓扑地图图像目录
+MODEL_WEIGHTS_PATH = os.path.normpath(os.path.join(BASE_DIR, "../model_weights"))
+ROBOT_CONFIG_PATH = os.path.normpath(os.path.join(BASE_DIR, "../config/robot.yaml"))
+MODEL_CONFIG_PATH = os.path.normpath(os.path.join(BASE_DIR, "../config/models.yaml"))
 with open(ROBOT_CONFIG_PATH, "r") as f:
     robot_config = yaml.safe_load(f)
 MAX_V = robot_config["max_v"]
@@ -66,7 +67,10 @@ def apply_benchmark_config(args: argparse.Namespace, section: str) -> argparse.N
     if not args.benchmark_config:
         return args
 
-    with open(args.benchmark_config, "r") as f:
+    benchmark_path = args.benchmark_config
+    if not os.path.isabs(benchmark_path):
+        benchmark_path = os.path.normpath(os.path.join(BASE_DIR, benchmark_path))
+    with open(benchmark_path, "r") as f:
         benchmark_cfg = yaml.safe_load(f) or {}
 
     merged_cfg = {}
@@ -77,7 +81,7 @@ def apply_benchmark_config(args: argparse.Namespace, section: str) -> argparse.N
         if hasattr(args, attr_name):
             setattr(args, attr_name, value)
 
-    print(f"Loaded benchmark config from {args.benchmark_config} ({section})")
+    print(f"Loaded benchmark config from {benchmark_path} ({section})")
     return args
 
 
@@ -103,6 +107,8 @@ def main(args: argparse.Namespace):
         model_paths = yaml.safe_load(f)
 
     model_config_path = model_paths[args.model]["config_path"]
+    if not os.path.isabs(model_config_path):
+        model_config_path = os.path.normpath(os.path.join(BASE_DIR, model_config_path))
     with open(model_config_path, "r") as f:
         model_params = yaml.safe_load(f)
 
@@ -119,6 +125,8 @@ def main(args: argparse.Namespace):
 
     # 2) 根据配置加载训练好的权重文件
     ckpth_path = model_paths[args.model]["ckpt_path"]
+    if not os.path.isabs(ckpth_path):
+        ckpth_path = os.path.normpath(os.path.join(BASE_DIR, ckpth_path))
     if os.path.exists(ckpth_path):
         print(f"Loading model from {ckpth_path}")
     else:
@@ -133,9 +141,10 @@ def main(args: argparse.Namespace):
 
     
      # 3) 加载离线构建好的拓扑地图图像列表（topomap）
-    topomap_filenames = sorted(os.listdir(os.path.join(
-        TOPOMAP_IMAGES_DIR, args.dir)), key=lambda x: int(x.split(".")[0]))
-    topomap_dir = f"{TOPOMAP_IMAGES_DIR}/{args.dir}"
+    topomap_dir = os.path.join(TOPOMAP_IMAGES_DIR, args.dir)
+    topomap_filenames = sorted(
+        os.listdir(topomap_dir), key=lambda x: int(os.path.splitext(x)[0])
+    )
     num_nodes = len(os.listdir(topomap_dir))
     topomap = []
     for i in range(num_nodes):

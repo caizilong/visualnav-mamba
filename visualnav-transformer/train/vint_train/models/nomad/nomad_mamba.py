@@ -164,6 +164,7 @@ class NoMaD_Mamba(nn.Module):
         context_size: int = 5,
         obs_encoder: Optional[str] = "efficientnet-b0",
         goal_encoder: Optional[str] = None,  # 新增：可单独指定 goal 编码器，默认与 obs_encoder 相同
+        pretrained_backbone: bool = True,
         obs_encoding_size: Optional[int] = 512,
         mha_num_attention_heads: Optional[int] = 2,   # 保留接口但目前未使用
         mha_num_attention_layers: Optional[int] = 2,  # 对应为 Mamba 层数
@@ -204,7 +205,7 @@ class NoMaD_Mamba(nn.Module):
         self.obs_encoder, self.num_obs_features = _create_timm_encoder(
             model_name=obs_encoder,
             in_chans=3,
-            pretrained=True,
+            pretrained=pretrained_backbone,
             use_gn=True,
             img_size=img_size,
         )
@@ -217,7 +218,7 @@ class NoMaD_Mamba(nn.Module):
             self.goal_encoder, self.num_goal_features = _create_timm_encoder(
                 model_name=goal_encoder,
                 in_chans=3,
-                pretrained=True,
+                pretrained=pretrained_backbone,
                 use_gn=True,
                 img_size=img_size,
             )

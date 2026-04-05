@@ -2,10 +2,29 @@
 import os
 import sys
 import io
-import matplotlib.pyplot as plt
 
-# ROS
-from sensor_msgs.msg import Image
+# Ensure local diffusion_policy package is importable in deployment runtime.
+_DEPLOY_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+_VINT_ROOT = os.path.dirname(os.path.dirname(_DEPLOY_SRC_DIR))
+_DIFFUSION_POLICY_CANDIDATES = [
+    # layout A: <...>/visualnav-transformer/diffusion_policy
+    os.path.join(_VINT_ROOT, "diffusion_policy"),
+    # layout B: <...>/visualnav-mamba/diffusion_policy
+    os.path.join(os.path.dirname(_VINT_ROOT), "diffusion_policy"),
+]
+for _root in _DIFFUSION_POLICY_CANDIDATES:
+    expected_module = os.path.join(
+        _root, "diffusion_policy", "model", "diffusion", "conditional_unet1d.py"
+    )
+    if os.path.isfile(expected_module) and _root not in sys.path:
+        sys.path.insert(0, _root)
+        break
+
+# Optional deps (ROS / plotting) are not required for CARLA inference.
+try:
+    from sensor_msgs.msg import Image
+except ImportError:
+    Image = None
 
 # pytorch
 import torch
@@ -17,16 +36,6 @@ import numpy as np
 from PIL import Image as PILImage
 from typing import List, Tuple, Dict, Optional
 
-# models
-from vint_train.models.gnm.gnm import GNM
-from vint_train.models.vint.vint import ViNT
-
-from vint_train.models.vint.vit import ViT
-from vint_train.models.nomad.nomad import NoMaD, DenseNetwork
-from vint_train.models.nomad.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
-from vint_train.models.nomad.nomad_mamba import NoMaD_Mamba
-from vint_train.models.nomad.mamba2 import MambaConfig
-from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from vint_train.data.data_utils import IMAGE_ASPECT_RATIO
 
 
@@ -45,6 +54,8 @@ def load_model(
     model_type = config["model_type"]
     
     if model_type == "gnm":
+        from vint_train.models.gnm.gnm import GNM
+
         model = GNM(
             config["context_size"],
             config["len_traj_pred"],
@@ -53,6 +64,8 @@ def load_model(
             config["goal_encoding_size"],
         )
     elif model_type == "vint":
+        from vint_train.models.vint.vint import ViNT
+
         model = ViNT(
             context_size=config["context_size"],
             len_traj_pred=config["len_traj_pred"],
@@ -65,7 +78,12 @@ def load_model(
             mha_ff_dim_factor=config["mha_ff_dim_factor"],
         )
     elif config["model_type"] == "nomad":
+        from vint_train.models.nomad.nomad import NoMaD, DenseNetwork
+        from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
+
         if config["vision_encoder"] == "nomad_vint":
+            from vint_train.models.nomad.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
+
             vision_encoder = NoMaD_ViNT(
                 obs_encoding_size=config["encoding_size"],
                 context_size=config["context_size"],
@@ -75,6 +93,9 @@ def load_model(
             )
             vision_encoder = replace_bn_with_gn(vision_encoder)
         elif config["vision_encoder"] == "nomad_mamba":
+            from vint_train.models.nomad.nomad_mamba import NoMaD_Mamba
+            from vint_train.models.nomad.mamba2 import MambaConfig
+
             # 使用 Mamba2 作为时序建模模块的 NoMaD 视觉编码器
             # 配置中的 image_size 为 [宽, 高]，timm 相关 backbone 需要 (高, 宽)
             img_size_hw = (config["image_size"][1], config["image_size"][0])
@@ -82,6 +103,7 @@ def load_model(
                 context_size=config["context_size"],
                 obs_encoder=config.get("obs_encoder", "efficientnet-b0"),
                 goal_encoder=config.get("goal_encoder", None),
+                pretrained_backbone=config.get("pretrained_backbone", False),
                 obs_encoding_size=config["encoding_size"],
                 mha_num_attention_heads=config["mha_num_attention_heads"],
                 mha_num_attention_layers=config["mha_num_attention_layers"],
@@ -95,6 +117,9 @@ def load_model(
                 adapter_scale=config.get("adapter_scale", 0.1),
             )
         elif config["vision_encoder"] == "vit": 
+            from vint_train.models.vint.vit import ViT
+            from vint_train.models.nomad.nomad_vint import replace_bn_with_gn
+
             vision_encoder = ViT(
                 obs_encoding_size=config["encoding_size"],
                 context_size=config["context_size"],
@@ -143,6 +168,8 @@ def load_model(
 
 
 def msg_to_pil(msg: Image) -> PILImage.Image:
+    if Image is None:
+        raise ImportError("sensor_msgs is required for msg_to_pil; install ROS sensor_msgs first.")
     img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
         msg.height, msg.width, -1)
     pil_image = PILImage.fromarray(img)
@@ -150,6 +177,8 @@ def msg_to_pil(msg: Image) -> PILImage.Image:
 
 
 def pil_to_msg(pil_img: PILImage.Image, encoding="mono8") -> Image:
+    if Image is None:
+        raise ImportError("sensor_msgs is required for pil_to_msg; install ROS sensor_msgs first.")
     img = np.asarray(pil_img)  
     ros_image = Image(encoding=encoding)
     ros_image.height, ros_image.width, _ = img.shape

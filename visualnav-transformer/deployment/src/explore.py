@@ -32,9 +32,10 @@ from topic_names import (IMAGE_TOPIC,
 
 
 # CONSTANTS
-MODEL_WEIGHTS_PATH = "../model_weights"
-ROBOT_CONFIG_PATH ="../config/robot.yaml"
-MODEL_CONFIG_PATH = "../config/models.yaml"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_WEIGHTS_PATH = os.path.normpath(os.path.join(BASE_DIR, "../model_weights"))
+ROBOT_CONFIG_PATH = os.path.normpath(os.path.join(BASE_DIR, "../config/robot.yaml"))
+MODEL_CONFIG_PATH = os.path.normpath(os.path.join(BASE_DIR, "../config/models.yaml"))
 with open(ROBOT_CONFIG_PATH, "r") as f:
     robot_config = yaml.safe_load(f)
 MAX_V = robot_config["max_v"]
@@ -64,7 +65,10 @@ def apply_benchmark_config(args: argparse.Namespace, section: str) -> argparse.N
     if not args.benchmark_config:
         return args
 
-    with open(args.benchmark_config, "r") as f:
+    benchmark_path = args.benchmark_config
+    if not os.path.isabs(benchmark_path):
+        benchmark_path = os.path.normpath(os.path.join(BASE_DIR, benchmark_path))
+    with open(benchmark_path, "r") as f:
         benchmark_cfg = yaml.safe_load(f) or {}
 
     merged_cfg = {}
@@ -75,7 +79,7 @@ def apply_benchmark_config(args: argparse.Namespace, section: str) -> argparse.N
         if hasattr(args, attr_name):
             setattr(args, attr_name, value)
 
-    print(f"Loaded benchmark config from {args.benchmark_config} ({section})")
+    print(f"Loaded benchmark config from {benchmark_path} ({section})")
     return args
 
 
@@ -87,6 +91,8 @@ def main(args: argparse.Namespace):
         model_paths = yaml.safe_load(f)
 
     model_config_path = model_paths[args.model]["config_path"]
+    if not os.path.isabs(model_config_path):
+        model_config_path = os.path.normpath(os.path.join(BASE_DIR, model_config_path))
     with open(model_config_path, "r") as f:
         model_params = yaml.safe_load(f)
 
@@ -94,6 +100,8 @@ def main(args: argparse.Namespace):
 
     # load model weights
     ckpth_path = model_paths[args.model]["ckpt_path"]
+    if not os.path.isabs(ckpth_path):
+        ckpth_path = os.path.normpath(os.path.join(BASE_DIR, ckpth_path))
     if os.path.exists(ckpth_path):
         print(f"Loading model from {ckpth_path}")
     else:
