@@ -63,6 +63,58 @@ def _shutdown_dataloader_workers(loader):
         pass
 
 
+def _build_optimizer_param_groups(config, model: nn.Module, base_lr: float):
+    if not (
+        config["model_type"] == "nomad"
+        and config.get("vision_encoder") == "nomad_mamba"
+        and config.get("use_differential_lr", False)
+    ):
+        return None
+
+    vision_encoder = getattr(model, "vision_encoder", None)
+    if vision_encoder is None:
+        return None
+
+    backbone_lr = float(config.get("backbone_lr", base_lr / 5.0))
+    backbone_param_ids = set()
+    backbone_params = []
+    for encoder_name in ("obs_encoder", "goal_encoder"):
+        encoder = getattr(vision_encoder, encoder_name, None)
+        if encoder is None:
+            continue
+        for parameter in encoder.parameters():
+            if not parameter.requires_grad:
+                continue
+            parameter_id = id(parameter)
+            if parameter_id in backbone_param_ids:
+                continue
+            backbone_param_ids.add(parameter_id)
+            backbone_params.append(parameter)
+
+    other_params = [
+        parameter
+        for parameter in model.parameters()
+        if parameter.requires_grad and id(parameter) not in backbone_param_ids
+    ]
+
+    param_groups = []
+    if other_params:
+        param_groups.append({"params": other_params, "lr": base_lr, "group_name": "main"})
+    if backbone_params:
+        param_groups.append({"params": backbone_params, "lr": backbone_lr, "group_name": "backbone"})
+
+    if len(param_groups) <= 1:
+        return None
+
+    print(
+        "Using differential LR:"
+        f" main_lr={base_lr:.2e}, backbone_lr={backbone_lr:.2e},"
+        f" main_params={sum(p.numel() for p in other_params) / 1e6:.2f}M,"
+        f" backbone_params={sum(p.numel() for p in backbone_params) / 1e6:.2f}M"
+    )
+    return param_groups
+
+
 def main(config):
     assert config["distance"]["min_dist_cat"] < config["distance"]["max_dist_cat"]
     assert config["action"]["min_dist_cat"] < config["action"]["max_dist_cat"]
@@ -80,7 +132,8 @@ def main(config):
     else:
         print("Using cpu")
 
-    first_gpu_id = config["gpu_ids"][0]
+    logical_gpu_ids = list(range(len(config["gpu_ids"]))) if torch.cuda.is_available() else []
+    first_gpu_id = logical_gpu_ids[0] if logical_gpu_ids else 0
     device = torch.device(
         f"cuda:{first_gpu_id}" if torch.cuda.is_available() else "cpu"
     )
@@ -157,6 +210,7 @@ def main(config):
         num_workers=config["num_workers"],
         drop_last=False,
         persistent_workers=config["num_workers"] > 0,
+        pin_memory=torch.cuda.is_available(),
     )
 
     if "eval_batch_size" not in config:
@@ -169,6 +223,7 @@ def main(config):
             shuffle=False,
             num_workers=0,
             drop_last=False,
+            pin_memory=torch.cuda.is_available(),
         )
 
     def _training_cleanup():
@@ -275,25 +330,31 @@ def main(config):
     else:
         raise ValueError(f"Model type {config['model_type']} not supported")
 
+    max_grad_norm = None
     if config["clipping"]:
-        print("Clipping gradients to", config["max_norm"])
-        for p in model.parameters():
-            if not p.requires_grad:
-                continue
-            p.register_hook(
-                lambda grad: torch.clamp(
-                    grad, -1 * config["max_norm"], config["max_norm"]
-                )
-            )
+        max_grad_norm = float(config["max_norm"])
+        print("Clipping gradients by global norm:", max_grad_norm)
 
     lr = float(config["lr"])
+    optimizer_param_groups = _build_optimizer_param_groups(config, model, lr)
     config["optimizer"] = config["optimizer"].lower()
     if config["optimizer"] == "adam":
-        optimizer = Adam(model.parameters(), lr=lr, betas=(0.9, 0.98))
+        optimizer = Adam(
+            optimizer_param_groups if optimizer_param_groups is not None else model.parameters(),
+            lr=lr,
+            betas=(0.9, 0.98),
+        )
     elif config["optimizer"] == "adamw":
-        optimizer = AdamW(model.parameters(), lr=lr)
+        optimizer = AdamW(
+            optimizer_param_groups if optimizer_param_groups is not None else model.parameters(),
+            lr=lr,
+        )
     elif config["optimizer"] == "sgd":
-        optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+        optimizer = torch.optim.SGD(
+            optimizer_param_groups if optimizer_param_groups is not None else model.parameters(),
+            lr=lr,
+            momentum=0.9,
+        )
     else:
         raise ValueError(f"Optimizer {config['optimizer']} not supported")
 
@@ -357,8 +418,8 @@ def main(config):
             current_epoch = latest_checkpoint["epoch"] + 1
 
     # Multi-GPU
-    if len(config["gpu_ids"]) > 1:
-        model = nn.DataParallel(model, device_ids=config["gpu_ids"])
+    if len(logical_gpu_ids) > 1:
+        model = nn.DataParallel(model, device_ids=logical_gpu_ids)
     model = model.to(device)
 
     if "load_run" in config:  # load optimizer and scheduler after data parallel
@@ -390,9 +451,15 @@ def main(config):
                     scheduler_state = torch.load(scheduler_latest_path, map_location="cpu")
 
         if optimizer_state is not None:
-            optimizer.load_state_dict(optimizer_state)
+            try:
+                optimizer.load_state_dict(optimizer_state)
+            except ValueError as exc:
+                print(f"Skipping optimizer state restore due to param-group mismatch: {exc}")
         if scheduler is not None and scheduler_state is not None:
-            scheduler.load_state_dict(scheduler_state)
+            try:
+                scheduler.load_state_dict(scheduler_state)
+            except ValueError as exc:
+                print(f"Skipping scheduler state restore due to mismatch: {exc}")
 
     # ---------- 进入统一的训练 / 评估循环 ----------
     if config["model_type"] == "vint" or config["model_type"] == "gnm": 
@@ -416,6 +483,7 @@ def main(config):
             alpha=config["alpha"],
             use_wandb=config["use_wandb"],
             eval_fraction=config["eval_fraction"],
+            max_grad_norm=max_grad_norm,
         )
     else:
         train_eval_loop_nomad(
@@ -444,6 +512,7 @@ def main(config):
             goal_guidance_min=float(config.get("goal_guidance_min", 0.25)),
             goal_guidance_max=float(config.get("goal_guidance_max", 1.75)),
             goal_guidance_power=float(config.get("goal_guidance_power", 1.5)),
+            max_grad_norm=max_grad_norm,
         )
 
     # 在打印结束前显式关闭 worker，避免仅依赖 atexit 时仍出现 semaphore 泄漏提示

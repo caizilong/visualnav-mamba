@@ -348,9 +348,13 @@ class NoMaD_Mamba(nn.Module):
     def _encode_goal_token(
         self,
         current_obs_token: torch.Tensor,
-        goal_img: torch.Tensor,
+        goal_img: Optional[torch.Tensor] = None,
+        goal_encoding: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        goal_encoding = _extract_features(self.goal_encoder, goal_img)
+        if goal_encoding is None:
+            if goal_img is None:
+                raise ValueError("Either goal_img or goal_encoding must be provided.")
+            goal_encoding = _extract_features(self.goal_encoder, goal_img)
         goal_encoding = self.compress_goal_enc(goal_encoding)
         goal_encoding = self.goal_adapter(goal_encoding)
         pair_features = self._make_pair_features(current_obs_token, goal_encoding)
@@ -398,8 +402,16 @@ class NoMaD_Mamba(nn.Module):
         obs_split = torch.split(obs_img, 3, dim=1)  # context_size+1 张 [B, 3, H, W]
         obs_stack = torch.cat(obs_split, dim=0)     # [B*(context_size+1), 3, H, W]
 
-        # 使用统一的特征提取函数
-        obs_encoding = _extract_features(self.obs_encoder, obs_stack)
+        # share_visual_backbone=True 时，将 obs 和 goal 合并到一次 backbone 前向中，
+        # 以减少重复调度与 kernel launch 开销。
+        goal_backbone_encoding = None
+        if self.share_visual_backbone:
+            joint_inputs = torch.cat((obs_stack, goal_img), dim=0)
+            joint_encoding = _extract_features(self.obs_encoder, joint_inputs)
+            obs_encoding = joint_encoding[: obs_stack.shape[0]]
+            goal_backbone_encoding = joint_encoding[obs_stack.shape[0] :]
+        else:
+            obs_encoding = _extract_features(self.obs_encoder, obs_stack)
         obs_encoding = self.compress_obs_enc(obs_encoding)
         obs_encoding = self.obs_adapter(obs_encoding)
 
@@ -412,7 +424,11 @@ class NoMaD_Mamba(nn.Module):
 
         # ------- 2) 目标编码：单独编码 goal，再与当前观察帧做门控融合 -------
         current_obs_token = obs_encoding[:, -1, :]
-        goal_encoding = self._encode_goal_token(current_obs_token, goal_img)  # [B, 1, C]
+        goal_encoding = self._encode_goal_token(
+            current_obs_token,
+            goal_img=goal_img,
+            goal_encoding=goal_backbone_encoding,
+        )  # [B, 1, C]
         goal_conditioned_obs = self._apply_goal_modulation(obs_encoding, goal_encoding)
 
         # ------- 3) 处理 goal mask -------

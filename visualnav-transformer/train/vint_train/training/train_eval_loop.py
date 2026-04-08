@@ -78,6 +78,7 @@ def train_eval_loop(
     learn_angle: bool = True,
     use_wandb: bool = True,
     eval_fraction: float = 0.25,
+    max_grad_norm: Optional[float] = None,
 ):
     """
     统一的训练 + 测试循环（适用于 ViNT / GNM 模型）。
@@ -129,6 +130,7 @@ def train_eval_loop(
                 image_log_freq=image_log_freq,
                 num_images_log=num_images_log,
                 use_wandb=use_wandb,
+                max_grad_norm=max_grad_norm,
             )
 
         avg_total_test_loss = []
@@ -175,11 +177,14 @@ def train_eval_loop(
             else:
                 scheduler.step()
         if use_wandb:
-            wandb.log({
+            lr_log = {
                 "epoch": epoch,
                 "avg_total_test_loss": np.mean(avg_total_test_loss),
                 "lr": optimizer.param_groups[0]["lr"],
-            }, commit=False)
+            }
+            if len(optimizer.param_groups) > 1:
+                lr_log["backbone_lr"] = optimizer.param_groups[1]["lr"]
+            wandb.log(lr_log, commit=False)
 
         numbered_path = os.path.join(project_folder, f"{epoch}.pth")
         torch.save(checkpoint, latest_path)
@@ -216,6 +221,7 @@ def train_eval_loop_nomad(
     goal_guidance_min: float = 0.25,
     goal_guidance_max: float = 1.75,
     goal_guidance_power: float = 1.5,
+    max_grad_norm: Optional[float] = None,
 ):
     """
     NoMaD（基于 diffusion policy）模型的训练 + 评估循环。
@@ -279,6 +285,7 @@ def train_eval_loop_nomad(
                 goal_guidance_min=goal_guidance_min,
                 goal_guidance_max=goal_guidance_max,
                 goal_guidance_power=goal_guidance_power,
+                max_grad_norm=max_grad_norm,
             )
             if lr_scheduler is not None:
                 lr_scheduler.step()
@@ -344,10 +351,13 @@ def train_eval_loop_nomad(
                     goal_guidance_power=goal_guidance_power,
                 )
         if use_wandb:
-            wandb.log({
+            lr_log = {
                 "epoch": epoch,
                 "lr": optimizer.param_groups[0]["lr"],
-            }, commit=False)
+            }
+            if len(optimizer.param_groups) > 1:
+                lr_log["backbone_lr"] = optimizer.param_groups[1]["lr"]
+            wandb.log(lr_log, commit=False)
 
         
     # Flush the last set of eval logs
