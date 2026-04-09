@@ -4,8 +4,8 @@ run_name: nomad_mamba
 # ---------------- 训练设置 ----------------
 use_wandb: True                           # 是否启用 wandb
 train: True
-batch_size: 64
-eval_batch_size: 64                       # 评估时使用较小的batch_size以避免OOM
+batch_size: 128
+eval_batch_size: 128                       # 评估时使用较小的batch_size以避免OOM
 epochs: 100
 gpu_ids: [0]
 num_workers: 12
@@ -76,7 +76,7 @@ goal_guidance_power: 1.5                 # 非线性调度，后段更快增强 
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal
-context_size: 2                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
+context_size: 4                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
 alpha: 1e-4                               # 与原 NoMaD 相同：距离损失权重很小
 
 # ---------------- 距离 / 动作 标签范围 ----------------
@@ -92,15 +92,15 @@ len_traj_pred: 8
 learn_angle: False
 
 # ---------------- 数据集设置 ----------------
-image_size: [160, 160]                      # [宽, 高]；ViT patch=16 时 160/16=10 ✓
+image_size: [96, 96]                      # [宽, 高]；ViT patch=16 时 160/16=10 ✓
 datasets:
-  # carla_dataset:
-  #   data_folder: /workspace/datasets/carla_dataset
-  #   train: vint_train/data/data_splits/carla_dataset/train/
-  #   test: vint_train/data/data_splits/carla_dataset/test/
-  #   end_slack: 1 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
-  #   goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
-  #   negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略  
+  carla_dataset:
+    data_folder: /workspace/datasets/carla_dataset
+    train: vint_train/data/data_splits/carla_dataset/train/
+    test: vint_train/data/data_splits/carla_dataset/test/
+    end_slack: 1 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
+    goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
+    negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略  
   # go_stanford:
   #   data_folder: /workspace/datasets/go_stanford
   #   train: vint_train/data/data_splits/go_stanford/train/
@@ -108,13 +108,13 @@ datasets:
   #   end_slack: 0 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
   #   goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
   #   negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略
-  recon:
-    data_folder: /workspace/datasets/recon0
-    train: vint_train/data/data_splits/recon0/train/ # path to train folder with traj_names.txt
-    test: vint_train/data/data_splits/recon0/test/ # path to test folder with traj_names.txt
-    end_slack: 3 # because many trajectories end in collisions
-    goals_per_obs: 1 # how many goals are sampled per observation
-    negative_mining: True # negative mining from the ViNG paper (Shah et al.)
+  # recon:
+  #   data_folder: /workspace/datasets/recon0
+  #   train: vint_train/data/data_splits/recon0/train/ # path to train folder with traj_names.txt
+  #   test: vint_train/data/data_splits/recon0/test/ # path to test folder with traj_names.txt
+  #   end_slack: 3 # because many trajectories end in collisions
+  #   goals_per_obs: 1 # how many goals are sampled per observation
+  #   negative_mining: True # negative mining from the ViNG paper (Shah et al.)
   # recon:
   #   data_folder: /home/<username>/nomad_dataset/recon
   #   train: /home/<username>/data_splits/recon/train/
