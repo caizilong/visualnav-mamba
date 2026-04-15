@@ -42,6 +42,8 @@ share_visual_backbone: true               # obs / goal 共用同一套 DINOv3 �
 adapter_hidden_dim: 96                    # 轻量 adapter 的瓶颈维度（约为 hidden size 的 1/4）
 adapter_scale: 0.1                        # 小尺度残差注入
 bidirectional_mamba: true               # 前向/反向 Mamba 同时建模，让 goal 信息反向传播到上下文
+use_goal_gate: true                     # 是否启用当前帧与 goal 的门控融合
+use_goal_film: true                     # 是否启用 goal-aware FiLM 调制历史 observation tokens
 goal_fusion_hidden_dim: 768             # 目标门控融合 MLP 的隐藏维度（= 2 * encoding_size）
 attn_unet: False
 cond_predict_scale: False

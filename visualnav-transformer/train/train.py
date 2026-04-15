@@ -281,6 +281,8 @@ def main(config):
                 mamba_cfg=MambaConfig.from_dict(config),
                 img_size=img_size_hw,  # 传递图像尺寸给 ViT 类模型
                 bidirectional_mamba=config.get("bidirectional_mamba", True),
+                use_goal_gate=config.get("use_goal_gate", True),
+                use_goal_film=config.get("use_goal_film", True),
                 goal_fusion_hidden_dim=config.get("goal_fusion_hidden_dim", None),
                 share_visual_backbone=config.get("share_visual_backbone", False),
                 adapter_hidden_dim=config.get("adapter_hidden_dim", None),

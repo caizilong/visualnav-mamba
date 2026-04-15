@@ -172,6 +172,8 @@ class NoMaD_Mamba(nn.Module):
         mamba_cfg: Optional["MambaConfig"] = None,
         img_size: Optional[Tuple[int, int]] = None,   # 新增：输入图像尺寸 (H, W)，用于 ViT 类模型
         bidirectional_mamba: bool = True,
+        use_goal_gate: bool = True,
+        use_goal_film: bool = True,
         goal_fusion_hidden_dim: Optional[int] = None,
         share_visual_backbone: bool = False,
         adapter_hidden_dim: Optional[int] = None,
@@ -184,6 +186,8 @@ class NoMaD_Mamba(nn.Module):
         self.context_size = context_size
         self.img_size = img_size
         self.bidirectional_mamba = bidirectional_mamba
+        self.use_goal_gate = use_goal_gate
+        self.use_goal_film = use_goal_film
         self.goal_fusion_hidden_dim = (
             goal_fusion_hidden_dim
             if goal_fusion_hidden_dim is not None
@@ -357,10 +361,13 @@ class NoMaD_Mamba(nn.Module):
             goal_encoding = _extract_features(self.goal_encoder, goal_img)
         goal_encoding = self.compress_goal_enc(goal_encoding)
         goal_encoding = self.goal_adapter(goal_encoding)
-        pair_features = self._make_pair_features(current_obs_token, goal_encoding)
-        goal_gate = torch.sigmoid(self.goal_gate(pair_features))
-        goal_delta = self.goal_delta(pair_features)
-        fused_goal = goal_encoding + goal_gate * goal_delta
+        if self.use_goal_gate:
+            pair_features = self._make_pair_features(current_obs_token, goal_encoding)
+            goal_gate = torch.sigmoid(self.goal_gate(pair_features))
+            goal_delta = self.goal_delta(pair_features)
+            fused_goal = goal_encoding + goal_gate * goal_delta
+        else:
+            fused_goal = goal_encoding
         return fused_goal.unsqueeze(1)
 
     def _apply_goal_modulation(
@@ -368,6 +375,8 @@ class NoMaD_Mamba(nn.Module):
         obs_encoding: torch.Tensor,
         goal_token: torch.Tensor,
     ) -> torch.Tensor:
+        if not self.use_goal_film:
+            return obs_encoding
         goal_context = goal_token.expand(-1, obs_encoding.shape[1], -1)
         pair_features = self._make_pair_features(obs_encoding, goal_context)
         modulation = self.obs_goal_modulation(pair_features.reshape(-1, pair_features.shape[-1]))

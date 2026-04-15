@@ -111,6 +111,8 @@ def load_model(
                 mamba_cfg=MambaConfig.from_dict(config),
                 img_size=img_size_hw,
                 bidirectional_mamba=config.get("bidirectional_mamba", True),
+                use_goal_gate=config.get("use_goal_gate", True),
+                use_goal_film=config.get("use_goal_film", True),
                 goal_fusion_hidden_dim=config.get("goal_fusion_hidden_dim", None),
                 share_visual_backbone=config.get("share_visual_backbone", False),
                 adapter_hidden_dim=config.get("adapter_hidden_dim", None),
