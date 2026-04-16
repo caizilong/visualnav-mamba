@@ -4,16 +4,16 @@ run_name: nomad_mamba
 # ---------------- 训练设置 ----------------
 use_wandb: True                           # 是否启用 wandb
 train: True
-batch_size: 128
-eval_batch_size: 128                       # 评估时使用较小的batch_size以避免OOM
+batch_size: 64
+eval_batch_size: 64                       # 评估时使用较小的batch_size以避免OOM
 epochs: 100
 gpu_ids: [0]
 num_workers: 12
 lr: 5e-5
 use_differential_lr: true                # 对 backbone 与新加模块使用不同学习率
-backbone_lr: 1e-5                        # 预训练视觉 backbone 用更小 LR，减少全参数微调的不稳定
+backbone_lr: 5e-5                        # 预训练视觉 backbone 用更小 LR，减少全参数微调的不稳定
 optimizer: adamw
-clipping: False
+clipping: True
 max_norm: 1.
 scheduler: "cosine"
 warmup: True
@@ -72,13 +72,13 @@ goal_mask_prob: 0.5
 normalize: True
 
 # ---------------- 推理时 guidance 调度 ----------------
-goal_guidance_min: 0.25                  # 早期 denoising 更接近无条件分支，鼓励探索
-goal_guidance_max: 1.75                  # 后期 denoising 强化目标条件，收敛到目标导航
-goal_guidance_power: 1.5                 # 非线性调度，后段更快增强 goal guidance
+goal_guidance_min: 1.00                  # 早期 denoising 更接近无条件分支，鼓励探索
+goal_guidance_max: 1.00                  # 后期 denoising 强化目标条件，收敛到目标导航
+goal_guidance_power: 1.0                 # 非线性调度，后段更快增强 goal guidance
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal
-context_size: 4                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
+context_size: 9                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
 alpha: 1e-4                               # 与原 NoMaD 相同：距离损失权重很小
 
 # ---------------- 距离 / 动作 标签范围 ----------------
@@ -96,20 +96,20 @@ learn_angle: False
 # ---------------- 数据集设置 ----------------
 image_size: [96, 96]                      # [宽, 高]；ViT patch=16 时 160/16=10 ✓
 datasets:
-  carla_dataset:
-    data_folder: /workspace/datasets/carla_dataset
-    train: vint_train/data/data_splits/carla_dataset/train/
-    test: vint_train/data/data_splits/carla_dataset/test/
-    end_slack: 1 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
-    goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
-    negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略  
-  # go_stanford:
-  #   data_folder: /workspace/datasets/go_stanford
-  #   train: vint_train/data/data_splits/go_stanford/train/
-  #   test: vint_train/data/data_splits/go_stanford/test/
-  #   end_slack: 0 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
+  # carla_dataset:
+  #   data_folder: /workspace/datasets/carla_dataset
+  #   train: vint_train/data/data_splits/carla_dataset/train/
+  #   test: vint_train/data/data_splits/carla_dataset/test/
+  #   end_slack: 1 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
   #   goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
-  #   negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略
+  #   negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略  
+  go_stanford:
+    data_folder: /workspace/datasets/go_stanford0
+    train: vint_train/data/data_splits/go_stanford0/train/
+    test: vint_train/data/data_splits/go_stanford0/test/
+    end_slack: 0 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
+    goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
+    negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略
   # recon:
   #   data_folder: /workspace/datasets/recon0
   #   train: vint_train/data/data_splits/recon0/train/ # path to train folder with traj_names.txt
