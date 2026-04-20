@@ -4,7 +4,7 @@
 以解决不同 numpy 版本之间的兼容性问题（numpy._core 模块不存在）。
 
 使用方法:
-    python convert_traj_data.py /path/to/datasets/carla_dataset
+    python3 convert_traj_data.py /workspace/datasets/carla_dataset
 """
 
 import os
@@ -36,22 +36,6 @@ def load_pickle_compat(filepath):
     """
     with open(filepath, "rb") as f:
         return NumpyCompatUnpickler(f).load()
-
-
-def convert_numpy_to_list(obj):
-    """
-    递归地将 numpy 数组转换为 Python 原生列表。
-    """
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, dict):
-        return {k: convert_numpy_to_list(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_numpy_to_list(item) for item in obj]
-    elif isinstance(obj, tuple):
-        return tuple(convert_numpy_to_list(item) for item in obj)
-    else:
-        return obj
 
 
 def convert_traj_data(data_folder: str, backup: bool = True):
@@ -110,10 +94,16 @@ def convert_traj_data(data_folder: str, backup: bool = True):
                         with open(backup_path, "wb") as dst:
                             dst.write(src.read())
             
-            # 转换数据
-            converted_data = convert_numpy_to_list(traj_data)
+            # 重新打包数据，确保它们是 float32 类型的 numpy array
+            converted_data = {
+                'position': np.array(traj_data['position'], dtype=np.float32),
+                'yaw': np.array(traj_data['yaw'], dtype=np.float32)
+            }
+            # 如果你有保存 action 等其他键，也要带上
+            if 'action' in traj_data:
+                 converted_data['action'] = np.array(traj_data['action'], dtype=np.float32)
             
-            # 保存转换后的数据
+            # 保存转换后的数据（在 Numpy 1.x 环境下运行此脚本，它就会存成 1.x 的格式）
             with open(pkl_path, "wb") as f:
                 pickle.dump(converted_data, f, protocol=pickle.HIGHEST_PROTOCOL)
             
