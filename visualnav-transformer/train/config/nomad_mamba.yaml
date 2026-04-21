@@ -4,7 +4,7 @@ run_name: nomad_mamba
 # ---------------- 训练设置 ----------------
 use_wandb: True                           # 是否启用 wandb
 train: True
-batch_size: 128
+batch_size: 64
 eval_batch_size: 64                       # 评估时使用较小的batch_size以避免OOM
 epochs: 100
 gpu_ids: [0]
@@ -72,13 +72,13 @@ goal_mask_prob: 0.5
 normalize: True
 
 # ---------------- 推理时 guidance 调度 ----------------
-goal_guidance_min: 1.00                  # 早期 denoising 更接近无条件分支，鼓励探索
-goal_guidance_max: 1.00                  # 后期 denoising 强化目标条件，收敛到目标导航
-goal_guidance_power: 1.0                 # 非线性调度，后段更快增强 goal guidance
+goal_guidance_min: 0.25                  # 早期 denoising 更接近无条件分支，鼓励探索
+goal_guidance_max: 1.75                  # 后期 denoising 强化目标条件，收敛到目标导航
+goal_guidance_power: 1.25                 # 非线性调度，后段更快增强 goal guidance
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal
-context_size: 4                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
+context_size: 9                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
 alpha: 1e-4                               # 与原 NoMaD 相同：距离损失权重很小
 
 # ---------------- 距离 / 动作 标签范围 ----------------
