@@ -1,10 +1,9 @@
-# Model Weight Naming
+# Model Weights
 
-Put deployment checkpoints in this folder.
+This repository is slimmed to **NoMaD-Mamba only**.
 
-Recommended filenames:
+Place your checkpoint at:
 
-- `nomad.pth`: original NoMaD checkpoint
-- `nomad_mamba.pth`: NoMaD-Mamba checkpoint used by `deployment/config/models.yaml`
+- `nomad_mamba.pth`
 
-If you change filenames, update `deployment/config/models.yaml` accordingly.
+and keep `deployment/config/models.yaml` pointing to it.

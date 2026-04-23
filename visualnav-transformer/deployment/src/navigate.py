@@ -1,69 +1,50 @@
-import matplotlib.pyplot as plt
-import os
-from typing import Tuple, Sequence, Dict, Union, Optional, Callable
-import numpy as np
-import torch
-import torch.nn as nn
-from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-
-import matplotlib.pyplot as plt
-import yaml
-
-# ROS 相关
-import rospy
-from sensor_msgs.msg import Image
-from std_msgs.msg import Bool, Float32MultiArray
-from utils import msg_to_pil, to_numpy, transform_images, load_model
-
-from vint_train.training.train_utils import get_action
-import torch
-from PIL import Image as PILImage
-import numpy as np
 import argparse
-import yaml
+import os
 import time
 
-# 话题名等工具
-from topic_names import (IMAGE_TOPIC,
-                        WAYPOINT_TOPIC,
-                        SAMPLED_ACTIONS_TOPIC)
+import numpy as np
+import rospy
+import torch
+import yaml
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from PIL import Image as PILImage
+from sensor_msgs.msg import Image
+from std_msgs.msg import Bool, Float32MultiArray
+
+from topic_names import IMAGE_TOPIC, SAMPLED_ACTIONS_TOPIC, WAYPOINT_TOPIC
+from utils import load_model, msg_to_pil, to_numpy, transform_images
+from vint_train.training.train_utils import get_action
 
 
-# CONSTANTS: 路径与机器人配置
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TOPOMAP_IMAGES_DIR = os.path.normpath(os.path.join(BASE_DIR, "../topomaps/images"))   # 预先离线生成的拓扑地图图像目录
-MODEL_WEIGHTS_PATH = os.path.normpath(os.path.join(BASE_DIR, "../model_weights"))
+TOPOMAP_IMAGES_DIR = os.path.normpath(os.path.join(BASE_DIR, "../topomaps/images"))
 ROBOT_CONFIG_PATH = os.path.normpath(os.path.join(BASE_DIR, "../config/robot.yaml"))
 MODEL_CONFIG_PATH = os.path.normpath(os.path.join(BASE_DIR, "../config/models.yaml"))
+
 with open(ROBOT_CONFIG_PATH, "r") as f:
     robot_config = yaml.safe_load(f)
 MAX_V = robot_config["max_v"]
-MAX_W = robot_config["max_w"]
-RATE = robot_config["frame_rate"] 
+RATE = robot_config["frame_rate"]
 
-# GLOBALS: 在线导航使用的全局状态
-context_queue = []   # 存储最近的观测帧，用于构造 ViNT / NoMaD 的上下文
-context_size = None  
-subgoal = []
+context_queue = []
+context_size = None
 
-# 推理使用的设备
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
 
 def callback_obs(msg):
     obs_img = msg_to_pil(msg)
-    # 只在 model_params 已加载完毕、context_size 已知后才开始入队
-    if context_size is not None:
-        if len(context_queue) < context_size + 1:
-            context_queue.append(obs_img)
-        else:
-            context_queue.pop(0)
-            context_queue.append(obs_img)
+    if context_size is None:
+        return
+    if len(context_queue) < context_size + 1:
+        context_queue.append(obs_img)
+    else:
+        context_queue.pop(0)
+        context_queue.append(obs_img)
 
 
 def apply_benchmark_config(args: argparse.Namespace, section: str) -> argparse.Namespace:
-    """用 benchmark 配置文件覆盖命令行参数，便于复现实验。"""
     if not args.benchmark_config:
         return args
 
@@ -92,249 +73,187 @@ def diffusion_guidance_scale(
     max_scale: float,
     power: float,
 ) -> float:
-    """前期弱 guidance 鼓励探索，后期强 guidance 逼近目标。"""
     if total_steps <= 1:
         return max_scale
     progress = step_idx / float(total_steps - 1)
     return min_scale + (max_scale - min_scale) * (progress ** power)
 
 
-def main(args: argparse.Namespace):
-    global context_size
-
-     # 1) 从 models.yaml 里找到指定模型的配置路径
+def _load_model_params(model_name: str):
     with open(MODEL_CONFIG_PATH, "r") as f:
         model_paths = yaml.safe_load(f)
 
-    model_config_path = model_paths[args.model]["config_path"]
+    if model_name not in model_paths:
+        raise KeyError(f"Unknown model '{model_name}'. Check {MODEL_CONFIG_PATH}.")
+
+    model_config_path = model_paths[model_name]["config_path"]
     if not os.path.isabs(model_config_path):
         model_config_path = os.path.normpath(os.path.join(BASE_DIR, model_config_path))
     with open(model_config_path, "r") as f:
         model_params = yaml.safe_load(f)
 
-    context_size = model_params["context_size"]
-    guidance_min = args.guidance_min
-    if guidance_min is None:
-        guidance_min = model_params.get("goal_guidance_min", 1.0)
-    guidance_max = args.guidance_max
-    if guidance_max is None:
-        guidance_max = model_params.get("goal_guidance_max", 1.0)
-    guidance_power = args.guidance_power
-    if guidance_power is None:
-        guidance_power = model_params.get("goal_guidance_power", 1.0)
+    if model_params.get("model_type") != "nomad" or model_params.get("vision_encoder") != "nomad_mamba":
+        raise ValueError(
+            "navigate.py only supports NoMaD-Mamba configs: "
+            "`model_type: nomad` and `vision_encoder: nomad_mamba`."
+        )
 
-    # 2) 根据配置加载训练好的权重文件
-    ckpth_path = model_paths[args.model]["ckpt_path"]
-    if not os.path.isabs(ckpth_path):
-        ckpth_path = os.path.normpath(os.path.join(BASE_DIR, ckpth_path))
-    if os.path.exists(ckpth_path):
-        print(f"Loading model from {ckpth_path}")
-    else:
-        raise FileNotFoundError(f"Model weights not found at {ckpth_path}")
-    model = load_model(
-        ckpth_path,
-        model_params,
-        device,
-    )
-    model = model.to(device)
+    ckpt_path = model_paths[model_name]["ckpt_path"]
+    if not os.path.isabs(ckpt_path):
+        ckpt_path = os.path.normpath(os.path.join(BASE_DIR, ckpt_path))
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Model weights not found at {ckpt_path}")
+
+    print(f"Loading model from {ckpt_path}")
+    model = load_model(ckpt_path, model_params, device).to(device)
     model.eval()
+    return model, model_params
 
-    
-     # 3) 加载离线构建好的拓扑地图图像列表（topomap）
+
+def main(args: argparse.Namespace):
+    global context_size
+
+    model, model_params = _load_model_params(args.model)
+
+    context_size = model_params["context_size"]
+    guidance_min = args.guidance_min if args.guidance_min is not None else model_params.get("goal_guidance_min", 1.0)
+    guidance_max = args.guidance_max if args.guidance_max is not None else model_params.get("goal_guidance_max", 1.0)
+    guidance_power = args.guidance_power if args.guidance_power is not None else model_params.get("goal_guidance_power", 1.0)
+
     topomap_dir = os.path.join(TOPOMAP_IMAGES_DIR, args.dir)
-    topomap_filenames = sorted(
-        os.listdir(topomap_dir), key=lambda x: int(os.path.splitext(x)[0])
-    )
-    num_nodes = len(os.listdir(topomap_dir))
+    topomap_filenames = sorted(os.listdir(topomap_dir), key=lambda x: int(os.path.splitext(x)[0]))
+    num_nodes = len(topomap_filenames)
     topomap = []
     for i in range(num_nodes):
         image_path = os.path.join(topomap_dir, topomap_filenames[i])
         topomap.append(PILImage.open(image_path))
 
-    # closest_node 表示当前认为机器人所在的拓扑图节点索引
     closest_node = 0
     assert -1 <= args.goal_node < len(topomap), "Invalid goal index"
-    if args.goal_node == -1:
-        goal_node = len(topomap) - 1
-    else:
-        goal_node = args.goal_node
-    reached_goal = False
+    goal_node = len(topomap) - 1 if args.goal_node == -1 else args.goal_node
 
-     # 4) ROS 节点与话题初始化
     rospy.init_node("EXPLORATION", anonymous=False)
     rate = rospy.Rate(RATE)
-    image_curr_msg = rospy.Subscriber(
-        IMAGE_TOPIC, Image, callback_obs, queue_size=1)
-    waypoint_pub = rospy.Publisher(
-        WAYPOINT_TOPIC, Float32MultiArray, queue_size=1)  
+    rospy.Subscriber(IMAGE_TOPIC, Image, callback_obs, queue_size=1)
+    waypoint_pub = rospy.Publisher(WAYPOINT_TOPIC, Float32MultiArray, queue_size=1)
     sampled_actions_pub = rospy.Publisher(SAMPLED_ACTIONS_TOPIC, Float32MultiArray, queue_size=1)
     goal_pub = rospy.Publisher("/topoplan/reached_goal", Bool, queue_size=1)
 
     print("Registered with master node. Waiting for image observations...")
 
-    # 5) NoMaD 模型需要额外构建一个 DDPM 噪声调度器（与训练时保持一致）
-    if model_params["model_type"] == "nomad":
-        num_diffusion_iters = model_params["num_diffusion_iters"]
-        noise_scheduler = DDPMScheduler(
-            num_train_timesteps=model_params["num_diffusion_iters"],
-            beta_schedule='squaredcos_cap_v2',
-            clip_sample=True,
-            prediction_type='epsilon'
-        )
-    # ---------- 主导航循环 ----------
+    num_diffusion_iters = model_params["num_diffusion_iters"]
+    noise_scheduler = DDPMScheduler(
+        num_train_timesteps=num_diffusion_iters,
+        beta_schedule="squaredcos_cap_v2",
+        clip_sample=True,
+        prediction_type="epsilon",
+    )
+
     while not rospy.is_shutdown():
-        # EXPLORATION MODE：根据 topomap 选择子目标并推理局部 waypoints
         chosen_waypoint = np.zeros(4)
         if len(context_queue) > model_params["context_size"]:
-            if model_params["model_type"] == "nomad":
-                # 对最近若干观测帧做相同的预处理与堆叠（与训练时保持一致）
-                obs_images = transform_images(context_queue, model_params["image_size"], center_crop=False)
-                obs_images = torch.split(obs_images, 3, dim=1)
-                obs_images = torch.cat(obs_images, dim=1) 
-                obs_images = obs_images.to(device)
-                mask = torch.zeros(1).long().to(device)  
+            obs_images = transform_images(context_queue, model_params["image_size"], center_crop=False)
+            obs_images = torch.split(obs_images, 3, dim=1)
+            obs_images = torch.cat(obs_images, dim=1).to(device)
+            mask = torch.zeros(1).long().to(device)
 
-                # 在拓扑图上，以当前节点为中心、在一定半径内搜索可能的目标节点
-                start = max(closest_node - args.radius, 0)
-                end = min(closest_node + args.radius + 1, goal_node)
-                goal_image = [transform_images(g_img, model_params["image_size"], center_crop=False).to(device) for g_img in topomap[start:end + 1]]
-                goal_image = torch.concat(goal_image, dim=0)
+            start = max(closest_node - args.radius, 0)
+            end = min(closest_node + args.radius + 1, goal_node)
+            goal_image = [
+                transform_images(g_img, model_params["image_size"], center_crop=False).to(device)
+                for g_img in topomap[start : end + 1]
+            ]
+            goal_image = torch.concat(goal_image, dim=0)
 
-                with torch.inference_mode():
-                    obsgoal_cond = model(
-                        'vision_encoder',
-                        obs_img=obs_images.repeat(len(goal_image), 1, 1, 1),
-                        goal_img=goal_image,
-                        input_goal_mask=mask.repeat(len(goal_image)),
-                    )
-                    dists = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
-                    dists = to_numpy(dists.flatten())
-                    min_idx = np.argmin(dists)
-                    closest_node = min_idx + start
-                    print("closest node:", closest_node)
-                    sg_idx = min(
-                        min_idx + int(dists[min_idx] < args.close_threshold),
-                        len(obsgoal_cond) - 1,
-                    )
-                    cond_obs_cond = obsgoal_cond[sg_idx].unsqueeze(0)
-                    selected_goal_img = goal_image[sg_idx].unsqueeze(0)
-                    no_goal_mask = torch.ones(1, dtype=torch.long, device=device)
-                    obs_cond = model(
-                        'vision_encoder',
-                        obs_img=obs_images,
-                        goal_img=selected_goal_img,
-                        input_goal_mask=no_goal_mask,
-                    )
+            with torch.inference_mode():
+                obsgoal_cond = model(
+                    "vision_encoder",
+                    obs_img=obs_images.repeat(len(goal_image), 1, 1, 1),
+                    goal_img=goal_image,
+                    input_goal_mask=mask.repeat(len(goal_image)),
+                )
+                dists = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
+                dists = to_numpy(dists.flatten())
+                min_idx = np.argmin(dists)
+                closest_node = min_idx + start
+                print("closest node:", closest_node)
+                sg_idx = min(min_idx + int(dists[min_idx] < args.close_threshold), len(obsgoal_cond) - 1)
+                cond_obs_cond = obsgoal_cond[sg_idx].unsqueeze(0)
+                selected_goal_img = goal_image[sg_idx].unsqueeze(0)
+                no_goal_mask = torch.ones(1, dtype=torch.long, device=device)
+                obs_cond = model(
+                    "vision_encoder",
+                    obs_img=obs_images,
+                    goal_img=selected_goal_img,
+                    input_goal_mask=no_goal_mask,
+                )
 
-                    # encoder vision features
-                    if len(obs_cond.shape) == 2:
-                        obs_cond = obs_cond.repeat(args.num_samples, 1)
-                        cond_obs_cond = cond_obs_cond.repeat(args.num_samples, 1)
-                    else:
-                        obs_cond = obs_cond.repeat(args.num_samples, 1, 1)
-                        cond_obs_cond = cond_obs_cond.repeat(args.num_samples, 1, 1)
-                    
-                    # initialize action from Gaussian noise
-                    noisy_action = torch.randn(
-                        (args.num_samples, model_params["len_traj_pred"], 2), device=device)
-                    naction = noisy_action
-
-                    # init scheduler
-                    noise_scheduler.set_timesteps(num_diffusion_iters)
-
-                    start_time = time.time()
-                    total_steps = len(noise_scheduler.timesteps)
-                    for step_idx, k in enumerate(noise_scheduler.timesteps[:]):
-                        unconditional_noise = model(
-                            'noise_pred_net',
-                            sample=naction,
-                            timestep=k,
-                            global_cond=obs_cond
-                        )
-                        conditional_noise = model(
-                            'noise_pred_net',
-                            sample=naction,
-                            timestep=k,
-                            global_cond=cond_obs_cond
-                        )
-                        guidance_scale = diffusion_guidance_scale(
-                            step_idx,
-                            total_steps,
-                            guidance_min,
-                            guidance_max,
-                            guidance_power,
-                        )
-                        noise_pred = unconditional_noise + guidance_scale * (
-                            conditional_noise - unconditional_noise
-                        )
-                        # inverse diffusion step (remove noise)
-                        naction = noise_scheduler.step(
-                            model_output=noise_pred,
-                            timestep=k,
-                            sample=naction
-                        ).prev_sample
-                    print("time elapsed:", time.time() - start_time)
-
-                naction = to_numpy(get_action(naction))
-                sampled_actions_msg = Float32MultiArray()
-                sampled_actions_msg.data = np.concatenate((np.array([0]), naction.flatten()))
-                print("published sampled actions")
-                sampled_actions_pub.publish(sampled_actions_msg)
-                naction = naction[0] 
-                chosen_waypoint = naction[args.waypoint]
-            else:
-                start = max(closest_node - args.radius, 0)
-                end = min(closest_node + args.radius + 1, goal_node)
-                distances = []
-                waypoints = []
-                batch_obs_imgs = []
-                batch_goal_data = []
-                for i, sg_img in enumerate(topomap[start: end + 1]):
-                    transf_obs_img = transform_images(context_queue, model_params["image_size"])
-                    goal_data = transform_images(sg_img, model_params["image_size"])
-                    batch_obs_imgs.append(transf_obs_img)
-                    batch_goal_data.append(goal_data)
-                    
-                # 统一 batch 推理所有候选子目标的距离与局部轨迹
-                batch_obs_imgs = torch.cat(batch_obs_imgs, dim=0).to(device)
-                batch_goal_data = torch.cat(batch_goal_data, dim=0).to(device)
-
-                with torch.inference_mode():
-                    distances, waypoints = model(batch_obs_imgs, batch_goal_data)
-                    distances = to_numpy(distances)
-                    waypoints = to_numpy(waypoints)
-                # 找到当前观测到所有子目标中预测“时间距离”最小的节点
-                min_dist_idx = np.argmin(distances)
-                # chose subgoal and output waypoints
-                if distances[min_dist_idx] > args.close_threshold:
-                    chosen_waypoint = waypoints[min_dist_idx][args.waypoint]
-                    closest_node = start + min_dist_idx
+                if len(obs_cond.shape) == 2:
+                    obs_cond = obs_cond.repeat(args.num_samples, 1)
+                    cond_obs_cond = cond_obs_cond.repeat(args.num_samples, 1)
                 else:
-                    chosen_waypoint = waypoints[min(
-                        min_dist_idx + 1, len(waypoints) - 1)][args.waypoint]
-                    closest_node = min(start + min_dist_idx + 1, goal_node)
-        # RECOVERY MODE
+                    obs_cond = obs_cond.repeat(args.num_samples, 1, 1)
+                    cond_obs_cond = cond_obs_cond.repeat(args.num_samples, 1, 1)
+
+                naction = torch.randn((args.num_samples, model_params["len_traj_pred"], 2), device=device)
+                noise_scheduler.set_timesteps(num_diffusion_iters)
+
+                start_time = time.time()
+                total_steps = len(noise_scheduler.timesteps)
+                for step_idx, k in enumerate(noise_scheduler.timesteps[:]):
+                    unconditional_noise = model(
+                        "noise_pred_net",
+                        sample=naction,
+                        timestep=k,
+                        global_cond=obs_cond,
+                    )
+                    conditional_noise = model(
+                        "noise_pred_net",
+                        sample=naction,
+                        timestep=k,
+                        global_cond=cond_obs_cond,
+                    )
+                    guidance_scale = diffusion_guidance_scale(
+                        step_idx,
+                        total_steps,
+                        guidance_min,
+                        guidance_max,
+                        guidance_power,
+                    )
+                    noise_pred = unconditional_noise + guidance_scale * (conditional_noise - unconditional_noise)
+                    naction = noise_scheduler.step(model_output=noise_pred, timestep=k, sample=naction).prev_sample
+                print("time elapsed:", time.time() - start_time)
+
+            naction = to_numpy(get_action(naction))
+            sampled_actions_msg = Float32MultiArray()
+            sampled_actions_msg.data = np.concatenate((np.array([0]), naction.flatten()))
+            sampled_actions_pub.publish(sampled_actions_msg)
+
+            naction = naction[0]
+            chosen_waypoint = naction[args.waypoint]
+
         if model_params["normalize"]:
-            chosen_waypoint[:2] *= (MAX_V / RATE)  
+            chosen_waypoint[:2] *= (MAX_V / RATE)
         waypoint_msg = Float32MultiArray()
         waypoint_msg.data = chosen_waypoint
         waypoint_pub.publish(waypoint_msg)
+
         reached_goal = closest_node == goal_node
         goal_pub.publish(reached_goal)
         if reached_goal:
             print("Reached goal! Stopping...")
+
         rate.sleep()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Code to run GNM DIFFUSION EXPLORATION on the locobot")
+    parser = argparse.ArgumentParser(description="NoMaD-Mamba navigation on the LoCoBot")
     parser.add_argument(
         "--model",
         "-m",
-        default="nomad",
+        default="nomad_mamba",
         type=str,
-        help="model name (hint: check ../config/models.yaml) (default: nomad)",
+        help="model name (check ../config/models.yaml)",
     )
     parser.add_argument(
         "--benchmark-config",
@@ -345,10 +264,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--waypoint",
         "-w",
-        default=2, # close waypoints exihibit straight line motion (the middle waypoint is a good default)
+        default=2,
         type=int,
-        help=f"""index of the waypoint used for navigation (between 0 and 4 or 
-        how many waypoints your model predicts) (default: 2)""",
+        help="index of the waypoint used for navigation",
     )
     parser.add_argument(
         "--dir",
@@ -362,31 +280,28 @@ if __name__ == "__main__":
         "-g",
         default=-1,
         type=int,
-        help="""goal node index in the topomap (if -1, then the goal node is 
-        the last node in the topomap) (default: -1)""",
+        help="goal node index in the topomap (if -1, use the last node)",
     )
     parser.add_argument(
         "--close-threshold",
         "-t",
         default=3,
         type=int,
-        help="""temporal distance within the next node in the topomap before 
-        localizing to it (default: 3)""",
+        help="distance threshold for moving to the next sub-goal",
     )
     parser.add_argument(
         "--radius",
         "-r",
         default=4,
         type=int,
-        help="""temporal number of locobal nodes to look at in the topopmap for
-        localization (default: 2)""",
+        help="temporal search radius over topological nodes",
     )
     parser.add_argument(
         "--num-samples",
         "-n",
         default=8,
         type=int,
-        help=f"Number of actions sampled from the exploration model (default: 8)",
+        help="number of sampled trajectories",
     )
     parser.add_argument(
         "--guidance-min",

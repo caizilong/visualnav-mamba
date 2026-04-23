@@ -1,15 +1,11 @@
-
 import os
 import sys
-import io
 
 # Ensure local diffusion_policy package is importable in deployment runtime.
 _DEPLOY_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 _VINT_ROOT = os.path.dirname(os.path.dirname(_DEPLOY_SRC_DIR))
 _DIFFUSION_POLICY_CANDIDATES = [
-    # layout A: <...>/visualnav-transformer/diffusion_policy
     os.path.join(_VINT_ROOT, "diffusion_policy"),
-    # layout B: <...>/visualnav-mamba/diffusion_policy
     os.path.join(os.path.dirname(_VINT_ROOT), "diffusion_policy"),
 ]
 for _root in _DIFFUSION_POLICY_CANDIDATES:
@@ -20,23 +16,24 @@ for _root in _DIFFUSION_POLICY_CANDIDATES:
         sys.path.insert(0, _root)
         break
 
-# Optional deps (ROS / plotting) are not required for CARLA inference.
 try:
     from sensor_msgs.msg import Image
 except ImportError:
     Image = None
 
-# pytorch
+import numpy as np
 import torch
 import torch.nn as nn
-from torchvision import transforms
 import torchvision.transforms.functional as TF
-
-import numpy as np
 from PIL import Image as PILImage
-from typing import List, Tuple, Dict, Optional
+from torchvision import transforms
+from typing import List
 
+from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from vint_train.data.data_utils import IMAGE_ASPECT_RATIO
+from vint_train.models.nomad.mamba2 import MambaConfig
+from vint_train.models.nomad.nomad import DenseNetwork, NoMaD
+from vint_train.models.nomad.nomad_mamba import NoMaD_Mamba
 
 
 def load_model(
@@ -44,127 +41,55 @@ def load_model(
     config: dict,
     device: torch.device = torch.device("cpu"),
 ) -> nn.Module:
-    """
-    根据配置构建模型结构，并从 checkpoint 中加载权重。
-
-    注意：
-    - 训练可能使用 DataParallel，多 GPU 时需要从 `loaded_model.module.state_dict()` 还原
-    - 推理阶段只保留单一模型副本，并移动到指定 device
-    """
-    model_type = config["model_type"]
-    
-    if model_type == "gnm":
-        from vint_train.models.gnm.gnm import GNM
-
-        model = GNM(
-            config["context_size"],
-            config["len_traj_pred"],
-            config["learn_angle"],
-            config["obs_encoding_size"],
-            config["goal_encoding_size"],
+    """Build NoMaD-Mamba and load checkpoint weights."""
+    if config.get("model_type") != "nomad" or config.get("vision_encoder") != "nomad_mamba":
+        raise ValueError(
+            "This deployment runtime only supports `model_type: nomad` + "
+            "`vision_encoder: nomad_mamba`."
         )
-    elif model_type == "vint":
-        from vint_train.models.vint.vint import ViNT
 
-        model = ViNT(
-            context_size=config["context_size"],
-            len_traj_pred=config["len_traj_pred"],
-            learn_angle=config["learn_angle"],
-            obs_encoder=config["obs_encoder"],
-            obs_encoding_size=config["obs_encoding_size"],
-            late_fusion=config["late_fusion"],
-            mha_num_attention_heads=config["mha_num_attention_heads"],
-            mha_num_attention_layers=config["mha_num_attention_layers"],
-            mha_ff_dim_factor=config["mha_ff_dim_factor"],
-        )
-    elif config["model_type"] == "nomad":
-        from vint_train.models.nomad.nomad import NoMaD, DenseNetwork
-        from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
+    img_size_hw = (config["image_size"][1], config["image_size"][0])
+    vision_encoder = NoMaD_Mamba(
+        context_size=config["context_size"],
+        obs_encoder=config.get("obs_encoder", "efficientnet-b0"),
+        goal_encoder=config.get("goal_encoder", None),
+        pretrained_backbone=config.get("pretrained_backbone", False),
+        obs_encoding_size=config["encoding_size"],
+        mha_num_attention_heads=config["mha_num_attention_heads"],
+        mha_num_attention_layers=config["mha_num_attention_layers"],
+        mha_ff_dim_factor=config["mha_ff_dim_factor"],
+        mamba_cfg=MambaConfig.from_dict(config),
+        img_size=img_size_hw,
+        bidirectional_mamba=config.get("bidirectional_mamba", True),
+        use_goal_gate=config.get("use_goal_gate", True),
+        use_goal_film=config.get("use_goal_film", True),
+        goal_fusion_hidden_dim=config.get("goal_fusion_hidden_dim", None),
+        share_visual_backbone=config.get("share_visual_backbone", False),
+        adapter_hidden_dim=config.get("adapter_hidden_dim", None),
+        adapter_scale=config.get("adapter_scale", 0.1),
+    )
 
-        if config["vision_encoder"] == "nomad_vint":
-            from vint_train.models.nomad.nomad_vint import NoMaD_ViNT, replace_bn_with_gn
+    noise_pred_net = ConditionalUnet1D(
+        input_dim=2,
+        global_cond_dim=config["encoding_size"],
+        down_dims=config["down_dims"],
+        cond_predict_scale=config["cond_predict_scale"],
+    )
+    dist_pred_network = DenseNetwork(embedding_dim=config["encoding_size"])
 
-            vision_encoder = NoMaD_ViNT(
-                obs_encoding_size=config["encoding_size"],
-                context_size=config["context_size"],
-                mha_num_attention_heads=config["mha_num_attention_heads"],
-                mha_num_attention_layers=config["mha_num_attention_layers"],
-                mha_ff_dim_factor=config["mha_ff_dim_factor"],
-            )
-            vision_encoder = replace_bn_with_gn(vision_encoder)
-        elif config["vision_encoder"] == "nomad_mamba":
-            from vint_train.models.nomad.nomad_mamba import NoMaD_Mamba
-            from vint_train.models.nomad.mamba2 import MambaConfig
+    model = NoMaD(
+        vision_encoder=vision_encoder,
+        noise_pred_net=noise_pred_net,
+        dist_pred_net=dist_pred_network,
+    )
 
-            # 使用 Mamba2 作为时序建模模块的 NoMaD 视觉编码器
-            # 配置中的 image_size 为 [宽, 高]，timm 相关 backbone 需要 (高, 宽)
-            img_size_hw = (config["image_size"][1], config["image_size"][0])
-            vision_encoder = NoMaD_Mamba(
-                context_size=config["context_size"],
-                obs_encoder=config.get("obs_encoder", "efficientnet-b0"),
-                goal_encoder=config.get("goal_encoder", None),
-                pretrained_backbone=config.get("pretrained_backbone", False),
-                obs_encoding_size=config["encoding_size"],
-                mha_num_attention_heads=config["mha_num_attention_heads"],
-                mha_num_attention_layers=config["mha_num_attention_layers"],
-                mha_ff_dim_factor=config["mha_ff_dim_factor"],
-                mamba_cfg=MambaConfig.from_dict(config),
-                img_size=img_size_hw,
-                bidirectional_mamba=config.get("bidirectional_mamba", True),
-                use_goal_gate=config.get("use_goal_gate", True),
-                use_goal_film=config.get("use_goal_film", True),
-                goal_fusion_hidden_dim=config.get("goal_fusion_hidden_dim", None),
-                share_visual_backbone=config.get("share_visual_backbone", False),
-                adapter_hidden_dim=config.get("adapter_hidden_dim", None),
-                adapter_scale=config.get("adapter_scale", 0.1),
-            )
-        elif config["vision_encoder"] == "vit": 
-            from vint_train.models.vint.vit import ViT
-            from vint_train.models.nomad.nomad_vint import replace_bn_with_gn
-
-            vision_encoder = ViT(
-                obs_encoding_size=config["encoding_size"],
-                context_size=config["context_size"],
-                image_size=config["image_size"],
-                patch_size=config["patch_size"],
-                mha_num_attention_heads=config["mha_num_attention_heads"],
-                mha_num_attention_layers=config["mha_num_attention_layers"],
-            )
-            vision_encoder = replace_bn_with_gn(vision_encoder)
-        else: 
-            raise ValueError(f"Vision encoder {config['vision_encoder']} not supported")
-        
-        noise_pred_net = ConditionalUnet1D(
-                input_dim=2,
-                global_cond_dim=config["encoding_size"],
-                down_dims=config["down_dims"],
-                cond_predict_scale=config["cond_predict_scale"],
-            )
-        dist_pred_network = DenseNetwork(embedding_dim=config["encoding_size"])
-        
-        model = NoMaD(
-            vision_encoder=vision_encoder,
-            noise_pred_net=noise_pred_net,
-            dist_pred_net=dist_pred_network,
-        )
-    else:
-        raise ValueError(f"Invalid model type: {model_type}")
-    
     checkpoint = torch.load(model_path, map_location=device)
-    if model_type == "nomad":
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            state_dict = checkpoint["model_state_dict"]
-        else:
-            state_dict = checkpoint
-        model.load_state_dict(state_dict, strict=False)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
     else:
-        loaded_model = checkpoint["model"]
-        try:
-            state_dict = loaded_model.module.state_dict()
-            model.load_state_dict(state_dict, strict=False)
-        except AttributeError as e:
-            state_dict = loaded_model.state_dict()
-            model.load_state_dict(state_dict, strict=False)
+        state_dict = checkpoint
+
+    model.load_state_dict(state_dict, strict=False)
     model.to(device)
     return model
 
@@ -172,19 +97,17 @@ def load_model(
 def msg_to_pil(msg: Image) -> PILImage.Image:
     if Image is None:
         raise ImportError("sensor_msgs is required for msg_to_pil; install ROS sensor_msgs first.")
-    img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-        msg.height, msg.width, -1)
-    pil_image = PILImage.fromarray(img)
-    return pil_image
+    img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
+    return PILImage.fromarray(img)
 
 
 def pil_to_msg(pil_img: PILImage.Image, encoding="mono8") -> Image:
     if Image is None:
         raise ImportError("sensor_msgs is required for pil_to_msg; install ROS sensor_msgs first.")
-    img = np.asarray(pil_img)  
+    img = np.asarray(pil_img)
     ros_image = Image(encoding=encoding)
     ros_image.height, ros_image.width, _ = img.shape
-    ros_image.data = img.ravel().tobytes() 
+    ros_image.data = img.ravel().tobytes()
     ros_image.step = ros_image.width
     return ros_image
 
@@ -193,19 +116,16 @@ def to_numpy(tensor):
     return tensor.cpu().detach().numpy()
 
 
-def transform_images(pil_imgs: List[PILImage.Image], image_size: List[int], center_crop: bool = False) -> torch.Tensor:
-    """
-    将一张或多张 PIL 图像转成归一化后的 torch.Tensor。
-
-    返回张量形状为：
-        - 若输入 N 张图像，则输出 shape 为 [1, 3 * N, H, W]
-        - 其中通道维按 RGB 顺序逐帧拼接，便于 ViNT 等模型按通道堆叠上下文
-    """
+def transform_images(
+    pil_imgs: List[PILImage.Image],
+    image_size: List[int],
+    center_crop: bool = False,
+) -> torch.Tensor:
+    """Convert one or more PIL images into normalized tensor [1, 3*N, H, W]."""
     transform_type = transforms.Compose(
         [
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
-                                    0.229, 0.224, 0.225]),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
     if type(pil_imgs) != list:
@@ -215,18 +135,14 @@ def transform_images(pil_imgs: List[PILImage.Image], image_size: List[int], cent
         w, h = pil_img.size
         if center_crop:
             if w > h:
-                pil_img = TF.center_crop(pil_img, (h, int(h * IMAGE_ASPECT_RATIO)))  # crop to the right ratio
+                pil_img = TF.center_crop(pil_img, (h, int(h * IMAGE_ASPECT_RATIO)))
             else:
                 pil_img = TF.center_crop(pil_img, (int(w / IMAGE_ASPECT_RATIO), w))
-        # 先按给定尺寸 resize，再做 ToTensor + Normalize，与训练阶段保持一致
-        pil_img = pil_img.resize(image_size) 
+        pil_img = pil_img.resize(image_size)
         transf_img = transform_type(pil_img)
-        transf_img = torch.unsqueeze(transf_img, 0)
-        transf_imgs.append(transf_img)
+        transf_imgs.append(torch.unsqueeze(transf_img, 0))
     return torch.cat(transf_imgs, dim=1)
-    
 
-# clip angle between -pi and pi
+
 def clip_angle(angle):
-    """将任意角度规约到 [-pi, pi]，便于进行角度差计算。"""
     return np.mod(angle + np.pi, 2 * np.pi) - np.pi

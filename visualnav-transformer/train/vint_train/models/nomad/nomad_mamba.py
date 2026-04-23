@@ -1,13 +1,77 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
+import math
 
 import timm
 
-from vint_train.models.vint.self_attention import PositionalEncoding
-from .nomad_vint import replace_bn_with_gn
 from .mamba2 import Mamba2, MambaConfig
+
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_seq_len=6):
+        super().__init__()
+        pos_enc = torch.zeros(max_seq_len, d_model)
+        pos = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+        )
+        pos_enc[:, 0::2] = torch.sin(pos * div_term)
+        pos_enc[:, 1::2] = torch.cos(pos * div_term)
+        pos_enc = pos_enc.unsqueeze(0)
+        self.register_buffer("pos_enc", pos_enc)
+
+    def forward(self, x):
+        return x + self.pos_enc[:, : x.size(1), :]
+
+
+def replace_submodules(
+    root_module: nn.Module,
+    predicate: Callable[[nn.Module], bool],
+    func: Callable[[nn.Module], nn.Module],
+) -> nn.Module:
+    if predicate(root_module):
+        return func(root_module)
+
+    target_list = [
+        key.split(".")
+        for key, module in root_module.named_modules(remove_duplicate=True)
+        if predicate(module)
+    ]
+    for *parent, key in target_list:
+        parent_module = root_module
+        if parent:
+            parent_module = root_module.get_submodule(".".join(parent))
+        if isinstance(parent_module, nn.Sequential):
+            src_module = parent_module[int(key)]
+        else:
+            src_module = getattr(parent_module, key)
+        tgt_module = func(src_module)
+        if isinstance(parent_module, nn.Sequential):
+            parent_module[int(key)] = tgt_module
+        else:
+            setattr(parent_module, key, tgt_module)
+
+    verify_list = [
+        key.split(".")
+        for key, module in root_module.named_modules(remove_duplicate=True)
+        if predicate(module)
+    ]
+    assert len(verify_list) == 0
+    return root_module
+
+
+def replace_bn_with_gn(root_module: nn.Module, features_per_group: int = 16) -> nn.Module:
+    replace_submodules(
+        root_module=root_module,
+        predicate=lambda x: isinstance(x, nn.BatchNorm2d),
+        func=lambda x: nn.GroupNorm(
+            num_groups=x.num_features // features_per_group,
+            num_channels=x.num_features,
+        ),
+    )
+    return root_module
 
 
 # timm / HF 上权重名使用 lvd1689m（无下划线）；旧版误写 lvd_1689m 会导致 Invalid pretrained tag
@@ -145,7 +209,7 @@ class NoMaD_Mamba(nn.Module):
     """
     使用 Mamba2 代替 Transformer 的 NoMaD 视觉编码器版本。
 
-    与原始 `NoMaD_ViNT` 的主要差别：
+    与旧版 Transformer 视觉编码器的主要差别：
     - 使用 timm 库加载视觉编码器，支持多种 backbone（EfficientNet, ViT, DINOv2 等）；
     - 将 `TransformerEncoder` 替换为若干层 Mamba2 block，用于对
       [context_tokens + goal_token] 这一短序列进行建模；
@@ -321,7 +385,7 @@ class NoMaD_Mamba(nn.Module):
             self.mamba_layers_backward = None
             self.mamba_norms_backward = None
 
-        # goal mask 相关，与 NoMaD_ViNT 保持一致；注册为 buffer 随模型自动迁移设备
+        # goal mask 相关；注册为 buffer 随模型自动迁移设备
         goal_mask = torch.zeros((1, self.context_size + 2), dtype=torch.bool)
         goal_mask[:, -1] = True  # mask 掉最后一个 token（goal）
         no_mask = torch.zeros((1, self.context_size + 2), dtype=torch.bool)

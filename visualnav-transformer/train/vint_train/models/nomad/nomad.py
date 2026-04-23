@@ -1,8 +1,3 @@
-import os
-import argparse
-import time
-import pdb
-
 import torch
 import torch.nn as nn
 
@@ -73,6 +68,5 @@ class DenseNetwork(nn.Module):
         x = x.reshape((-1, self.embedding_dim))
         output = self.network(x)
         return output
-
 
 
