@@ -53,8 +53,8 @@ mha_ff_dim_factor: 4
 down_dims: [64, 128, 256]
 
 # Mamba2 超参数（可选，不设置则使用 MambaConfig 默认值；对 encoding_size=384 短序列建议较小值）
-# 约束条件: (encoding_size * mamba_expand) % mamba_headdim == 0   #123
-# 当前配置: (384 * 2) % 64 = 0 ✓   #123
+# 约束条件: (encoding_size * mamba_expand) % mamba_headdim == 0
+# 当前配置: (384 * 2) % 64 = 0 
 mamba_d_state: 64
 mamba_d_conv: 4
 mamba_expand: 2
@@ -74,7 +74,7 @@ normalize: True
 # ---------------- 推理时 guidance 调度 ----------------
 goal_guidance_min: 0.25                  # 早期 denoising 更接近无条件分支，鼓励探索
 goal_guidance_max: 1.75                  # 后期 denoising 强化目标条件，收敛到目标导航
-goal_guidance_power: 1.25                 # 非线性调度，后段更快增强 goal guidance
+goal_guidance_power: 1.25                # 非线性调度，后段更快增强 goal guidance
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal
@@ -94,14 +94,14 @@ len_traj_pred: 8
 learn_angle: False
 
 # ---------------- 数据集设置 ----------------
-image_size: [96, 96]                      # [宽, 高]；ViT patch=16 时 160/16=10 ✓
+image_size: [96, 96]
 datasets:
   carla_dataset:
     data_folder: /workspace/datasets/carla_dataset
     train: vint_train/data/data_splits/carla_dataset/train/
     test: vint_train/data/data_splits/carla_dataset/test/
-    end_slack: 1 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
-    goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
+    end_slack: 3 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
+    goals_per_obs: 1 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
     negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略  
   # go_stanford:
   #   data_folder: /workspace/datasets/go_stanford0
