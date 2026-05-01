@@ -63,10 +63,14 @@ def load_model(
         bidirectional_mamba=config.get("bidirectional_mamba", True),
         use_goal_gate=config.get("use_goal_gate", True),
         use_goal_film=config.get("use_goal_film", True),
+        use_goal_mamba_fusion=config.get("use_goal_mamba_fusion", True),
         goal_fusion_hidden_dim=config.get("goal_fusion_hidden_dim", None),
+        goal_mamba_fusion_hidden_dim=config.get("goal_mamba_fusion_hidden_dim", None),
         share_visual_backbone=config.get("share_visual_backbone", False),
         adapter_hidden_dim=config.get("adapter_hidden_dim", None),
         adapter_scale=config.get("adapter_scale", 0.1),
+        use_navigation_aux=config.get("use_navigation_aux", True),
+        nav_aux_hidden_dim=config.get("nav_aux_hidden_dim", None),
     )
 
     noise_pred_net = ConditionalUnet1D(

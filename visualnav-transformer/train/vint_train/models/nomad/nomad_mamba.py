@@ -238,10 +238,14 @@ class NoMaD_Mamba(nn.Module):
         bidirectional_mamba: bool = True,
         use_goal_gate: bool = True,
         use_goal_film: bool = True,
+        use_goal_mamba_fusion: bool = True,
         goal_fusion_hidden_dim: Optional[int] = None,
+        goal_mamba_fusion_hidden_dim: Optional[int] = None,
         share_visual_backbone: bool = False,
         adapter_hidden_dim: Optional[int] = None,
         adapter_scale: float = 0.1,
+        use_navigation_aux: bool = True,
+        nav_aux_hidden_dim: Optional[int] = None,
     ) -> None:
         super().__init__()
 
@@ -252,12 +256,20 @@ class NoMaD_Mamba(nn.Module):
         self.bidirectional_mamba = bidirectional_mamba
         self.use_goal_gate = use_goal_gate
         self.use_goal_film = use_goal_film
+        self.use_goal_mamba_fusion = use_goal_mamba_fusion
         self.goal_fusion_hidden_dim = (
             goal_fusion_hidden_dim
             if goal_fusion_hidden_dim is not None
             else 2 * self.obs_encoding_size
         )
+        self.goal_mamba_fusion_hidden_dim = (
+            goal_mamba_fusion_hidden_dim
+            if goal_mamba_fusion_hidden_dim is not None
+            else self.obs_encoding_size
+        )
         self.share_visual_backbone = share_visual_backbone
+        self.use_navigation_aux = use_navigation_aux
+        self._last_aux_outputs = None
 
         # 如果未指定 goal_encoder，则使用与 obs_encoder 相同的类型
         if goal_encoder is None:
@@ -334,6 +346,32 @@ class NoMaD_Mamba(nn.Module):
             nn.Linear(pair_dim, self.goal_fusion_hidden_dim),
             nn.SiLU(),
             nn.Linear(self.goal_fusion_hidden_dim, 2 * self.obs_encoding_size),
+        )
+        self.mamba_direction_gate = nn.Sequential(
+            nn.Linear(pair_dim, self.goal_mamba_fusion_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.goal_mamba_fusion_hidden_dim, 2),
+        )
+        self.goal_query_pool = nn.Sequential(
+            nn.Linear(pair_dim, self.goal_fusion_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.goal_fusion_hidden_dim, 1),
+        )
+
+        nav_aux_hidden_dim = (
+            nav_aux_hidden_dim
+            if nav_aux_hidden_dim is not None
+            else max(64, self.obs_encoding_size // 2)
+        )
+        self.goal_pos_head = nn.Sequential(
+            nn.LayerNorm(self.obs_encoding_size),
+            nn.Linear(self.obs_encoding_size, nav_aux_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(nav_aux_hidden_dim, 2),
+        )
+        self.nav_contrast_proj = nn.Sequential(
+            nn.LayerNorm(self.obs_encoding_size),
+            nn.Linear(self.obs_encoding_size, self.obs_encoding_size),
         )
 
         # -------- 位置编码 + Mamba2 序列建模 --------
@@ -449,6 +487,39 @@ class NoMaD_Mamba(nn.Module):
         # 使用较小幅度的 FiLM 调制，避免训练初期破坏原始视觉表示。
         return obs_encoding * (1 + 0.1 * torch.tanh(scale)) + 0.1 * bias
 
+    def _direction_weights(
+        self,
+        x: torch.Tensor,
+        goal_token: torch.Tensor,
+        goal_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        goal_context = goal_token.expand(-1, x.shape[1], -1)
+        pair_features = self._make_pair_features(x, goal_context)
+        logits = self.mamba_direction_gate(pair_features.reshape(-1, pair_features.shape[-1]))
+        weights = F.softmax(logits, dim=-1).reshape(x.shape[0], x.shape[1], 2)
+        if goal_mask is not None:
+            mask = goal_mask.float().reshape(-1, 1, 1)
+            weights = weights * (1 - mask) + 0.5 * mask
+        return weights
+
+    def get_aux_outputs(self):
+        return self._last_aux_outputs
+
+    def _pool_tokens(
+        self,
+        x: torch.Tensor,
+        goal_token: torch.Tensor,
+        src_key_padding_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        goal_context = goal_token.expand(-1, x.shape[1], -1)
+        pair_features = self._make_pair_features(x, goal_context)
+        pool_logits = self.goal_query_pool(pair_features.reshape(-1, pair_features.shape[-1]))
+        pool_logits = pool_logits.reshape(x.shape[0], x.shape[1])
+        if src_key_padding_mask is not None:
+            pool_logits = pool_logits.masked_fill(src_key_padding_mask, -1e4)
+        pool_weights = F.softmax(pool_logits, dim=1).unsqueeze(-1)
+        return (x * pool_weights).sum(dim=1)
+
     def forward(
         self,
         obs_img: torch.Tensor,
@@ -533,18 +604,26 @@ class NoMaD_Mamba(nn.Module):
                     self.mamba_norms_backward[layer_idx](x_reversed)
                 )
                 backward_delta = torch.flip(backward_delta, dims=[1])
-                x = x + 0.5 * (forward_delta + backward_delta)
+                if self.use_goal_mamba_fusion:
+                    direction_weights = self._direction_weights(x, goal_encoding, goal_mask)
+                    x = x + (
+                        direction_weights[..., 0:1] * forward_delta
+                        + direction_weights[..., 1:2] * backward_delta
+                    )
+                else:
+                    x = x + 0.5 * (forward_delta + backward_delta)
         else:
             for layer, norm in zip(self.mamba_layers, self.mamba_norms):
                 x = x + layer(norm(x))
 
-        # ------- 5) 按 mask 做加权平均池化，得到最终 embedding -------
-        if src_key_padding_mask is not None:
-            # avg_pool_mask 已注册为 buffer，自动与模型同设备
-            avg_mask = torch.index_select(
-                self.avg_pool_mask, 0, no_goal_mask
-            ).unsqueeze(-1)  # [B, seq_len, 1]
-            x = x * avg_mask
-
-        obs_encoding_tokens = x.mean(dim=1)  # [B, C]
+        # ------- 5) goal-query attention pooling，得到最终导航 embedding -------
+        obs_encoding_tokens = self._pool_tokens(x, goal_encoding, src_key_padding_mask)
+        if self.use_navigation_aux:
+            self._last_aux_outputs = {
+                "goal_pos_pred": self.goal_pos_head(obs_encoding_tokens),
+                "obs_nav_embedding": self.nav_contrast_proj(current_obs_token),
+                "goal_nav_embedding": self.nav_contrast_proj(goal_encoding.squeeze(1)),
+            }
+        else:
+            self._last_aux_outputs = None
         return obs_encoding_tokens

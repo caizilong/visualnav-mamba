@@ -4,6 +4,8 @@ run_name: nomad_mamba
 # ---------------- 训练设置 ----------------
 use_wandb: True                           # 是否启用 wandb
 train: True
+train_stage: representation_warmup        # representation_warmup / diffusion_tuning / finetune
+freeze_backbone: true                     # 预热和策略训练阶段默认冻结 DINOv3，finetune 可设为 false
 batch_size: 64
 eval_batch_size: 64                       # 评估时使用较小的batch_size以避免OOM
 epochs: 100
@@ -11,7 +13,7 @@ gpu_ids: [0]
 num_workers: 12
 lr: 5e-5
 use_differential_lr: true                # 对 backbone 与新加模块使用不同学习率
-backbone_lr: 5e-5                        # 预训练视觉 backbone 用更小 LR，减少全参数微调的不稳定
+backbone_lr: 5e-6                        # 预训练视觉 backbone 用更小 LR，减少全参数微调的不稳定
 optimizer: adamw
 clipping: True
 max_norm: 1.
@@ -44,7 +46,15 @@ adapter_scale: 0.1                        # 小尺度残差注入
 bidirectional_mamba: true               # 前向/反向 Mamba 同时建模，让 goal 信息反向传播到上下文
 use_goal_gate: true                     # 是否启用当前帧与 goal 的门控融合
 use_goal_film: true                     # 是否启用 goal-aware FiLM 调制历史 observation tokens
+use_goal_mamba_fusion: true             # 用 goal-observation 匹配特征自适应融合前向/反向 Mamba 信息流
 goal_fusion_hidden_dim: 768             # 目标门控融合 MLP 的隐藏维度（= 2 * encoding_size）
+goal_mamba_fusion_hidden_dim: 384       # goal-modulated bidirectional state-space fusion 的隐藏维度
+use_navigation_aux: true                # 启用导航几何辅助监督，让 DINO/adapter 学习 goal-relative affordance
+nav_aux_hidden_dim: 192                 # goal_pos 辅助预测头隐藏维度
+nav_goal_pos_loss_weight: 0.05          # 局部 goal 相对位置预测辅助损失权重
+nav_contrastive_loss_weight: 0.01       # obs-goal 导航表征对比损失权重
+nav_contrastive_temperature: 0.1
+aux_negative_distance_threshold: 20
 attn_unet: False
 cond_predict_scale: False
 mha_num_attention_heads: 4                # 这里用于控制 Mamba 层数/配置
@@ -75,6 +85,10 @@ normalize: True
 goal_guidance_min: 0.25                  # 早期 denoising 更接近无条件分支，鼓励探索
 goal_guidance_max: 1.75                  # 后期 denoising 强化目标条件，收敛到目标导航
 goal_guidance_power: 1.25                # 非线性调度，后段更快增强 goal guidance
+use_adaptive_guidance: true              # 根据目标距离置信度与多样本动作不确定性动态调节 guidance
+guidance_confidence_weight: 0.35         # 目标越可信，guidance 越强
+guidance_uncertainty_weight: 0.25        # 动作样本越分散，guidance 越保守
+guidance_distance_scale: 10.0            # 距离预测转目标置信度的指数尺度
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal

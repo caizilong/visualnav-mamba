@@ -99,6 +99,65 @@ def _build_optimizer_param_groups(config, model: nn.Module, base_lr: float):
     return param_groups
 
 
+def _set_requires_grad(module: nn.Module, enabled: bool) -> None:
+    for parameter in module.parameters():
+        parameter.requires_grad = enabled
+
+
+def _apply_train_stage(config: dict, model: NoMaD) -> None:
+    train_stage = config.get("train_stage", "finetune")
+    valid_stages = {"representation_warmup", "diffusion_tuning", "finetune"}
+    if train_stage not in valid_stages:
+        raise ValueError(f"train_stage must be one of {sorted(valid_stages)}, got {train_stage}")
+
+    freeze_backbone = bool(config.get("freeze_backbone", False))
+    vision_encoder = model.vision_encoder
+
+    if freeze_backbone or train_stage in {"representation_warmup", "diffusion_tuning"}:
+        for encoder_name in ("obs_encoder", "goal_encoder"):
+            encoder = getattr(vision_encoder, encoder_name, None)
+            if encoder is not None:
+                _set_requires_grad(encoder, False)
+
+    if train_stage == "representation_warmup":
+        _set_requires_grad(model.noise_pred_net, False)
+    elif train_stage == "diffusion_tuning":
+        _set_requires_grad(model.noise_pred_net, True)
+    else:
+        _set_requires_grad(model.noise_pred_net, True)
+
+    if train_stage == "finetune" and not freeze_backbone:
+        for encoder_name in ("obs_encoder", "goal_encoder"):
+            encoder = getattr(vision_encoder, encoder_name, None)
+            if encoder is not None:
+                _set_requires_grad(encoder, True)
+
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    backbone_trainable = 0
+    backbone_total = 0
+    seen_param_ids = set()
+    for encoder_name in ("obs_encoder", "goal_encoder"):
+        encoder = getattr(vision_encoder, encoder_name, None)
+        if encoder is None:
+            continue
+        for parameter in encoder.parameters():
+            parameter_id = id(parameter)
+            if parameter_id in seen_param_ids:
+                continue
+            seen_param_ids.add(parameter_id)
+            backbone_total += parameter.numel()
+            if parameter.requires_grad:
+                backbone_trainable += parameter.numel()
+
+    print(
+        "Training stage:"
+        f" {train_stage}, freeze_backbone={freeze_backbone},"
+        f" trainable={trainable / 1e6:.2f}M/{total / 1e6:.2f}M,"
+        f" backbone_trainable={backbone_trainable / 1e6:.2f}M/{backbone_total / 1e6:.2f}M"
+    )
+
+
 def main(config):
     _assert_nomad_mamba_config(config)
 
@@ -222,10 +281,14 @@ def main(config):
         bidirectional_mamba=config.get("bidirectional_mamba", True),
         use_goal_gate=config.get("use_goal_gate", True),
         use_goal_film=config.get("use_goal_film", True),
+        use_goal_mamba_fusion=config.get("use_goal_mamba_fusion", True),
         goal_fusion_hidden_dim=config.get("goal_fusion_hidden_dim", None),
+        goal_mamba_fusion_hidden_dim=config.get("goal_mamba_fusion_hidden_dim", None),
         share_visual_backbone=config.get("share_visual_backbone", False),
         adapter_hidden_dim=config.get("adapter_hidden_dim", None),
         adapter_scale=config.get("adapter_scale", 0.1),
+        use_navigation_aux=config.get("use_navigation_aux", True),
+        nav_aux_hidden_dim=config.get("nav_aux_hidden_dim", None),
     )
 
     noise_pred_net = ConditionalUnet1D(
@@ -240,6 +303,7 @@ def main(config):
         noise_pred_net=noise_pred_net,
         dist_pred_net=dist_pred_network,
     )
+    _apply_train_stage(config, model)
 
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=config["num_diffusion_iters"],
@@ -389,6 +453,7 @@ def main(config):
         epochs=config["epochs"],
         device=device,
         project_folder=config["project_folder"],
+        train_stage=config.get("train_stage", "finetune"),
         print_log_freq=config["print_log_freq"],
         wandb_log_freq=config["wandb_log_freq"],
         image_log_freq=config["image_log_freq"],
@@ -402,6 +467,16 @@ def main(config):
         goal_guidance_min=float(config.get("goal_guidance_min", 0.25)),
         goal_guidance_max=float(config.get("goal_guidance_max", 1.75)),
         goal_guidance_power=float(config.get("goal_guidance_power", 1.5)),
+        use_adaptive_guidance=config.get("use_adaptive_guidance", True),
+        guidance_confidence_weight=float(config.get("guidance_confidence_weight", 0.35)),
+        guidance_uncertainty_weight=float(config.get("guidance_uncertainty_weight", 0.25)),
+        guidance_distance_scale=float(config.get("guidance_distance_scale", 10.0)),
+        nav_goal_pos_loss_weight=float(config.get("nav_goal_pos_loss_weight", 0.05)),
+        nav_contrastive_loss_weight=float(config.get("nav_contrastive_loss_weight", 0.01)),
+        nav_contrastive_temperature=float(config.get("nav_contrastive_temperature", 0.1)),
+        aux_negative_distance_threshold=float(
+            config.get("aux_negative_distance_threshold", config["distance"]["max_dist_cat"])
+        ),
         max_grad_norm=max_grad_norm,
     )
 

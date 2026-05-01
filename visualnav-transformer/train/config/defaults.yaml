@@ -5,6 +5,8 @@ run_name: nomad_mamba
 # Training setup
 use_wandb: true
 train: true
+train_stage: finetune
+freeze_backbone: false
 batch_size: 64
 eval_batch_size: 64
 epochs: 100
@@ -35,7 +37,15 @@ adapter_scale: 0.1
 bidirectional_mamba: true
 use_goal_gate: true
 use_goal_film: true
+use_goal_mamba_fusion: true
 goal_fusion_hidden_dim: 768
+goal_mamba_fusion_hidden_dim: 384
+use_navigation_aux: true
+nav_aux_hidden_dim: 192
+nav_goal_pos_loss_weight: 0.05
+nav_contrastive_loss_weight: 0.01
+nav_contrastive_temperature: 0.1
+aux_negative_distance_threshold: 20
 
 # Temporal encoder depth
 mha_num_attention_heads: 4
@@ -58,7 +68,7 @@ mamba_use_mem_eff_path: true
 
 # Differential LR
 use_differential_lr: false
-backbone_lr: 5e-5
+backbone_lr: 5e-6
 
 # Data / labels
 normalize: true
@@ -71,6 +81,10 @@ alpha: 1e-4
 goal_guidance_min: 0.25
 goal_guidance_max: 1.75
 goal_guidance_power: 1.25
+use_adaptive_guidance: true
+guidance_confidence_weight: 0.35
+guidance_uncertainty_weight: 0.25
+guidance_distance_scale: 10.0
 
 # Label ranges
 distance:

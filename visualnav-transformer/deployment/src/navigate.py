@@ -72,11 +72,33 @@ def diffusion_guidance_scale(
     min_scale: float,
     max_scale: float,
     power: float,
-) -> float:
+    goal_confidence: float = None,
+    action_uncertainty: torch.Tensor = None,
+    confidence_weight: float = 0.0,
+    uncertainty_weight: float = 0.0,
+):
     if total_steps <= 1:
-        return max_scale
-    progress = step_idx / float(total_steps - 1)
-    return min_scale + (max_scale - min_scale) * (progress ** power)
+        base_scale = max_scale
+    else:
+        progress = step_idx / float(total_steps - 1)
+        base_scale = min_scale + (max_scale - min_scale) * (progress ** power)
+
+    if goal_confidence is None and action_uncertainty is None:
+        return base_scale
+
+    scale = torch.full(
+        (1,),
+        float(base_scale),
+        device=action_uncertainty.device if action_uncertainty is not None else device,
+    )
+    if goal_confidence is not None and confidence_weight != 0:
+        confidence = float(np.clip(goal_confidence, 0.0, 1.0))
+        scale = scale * (1 + confidence_weight * (2 * confidence - 1))
+    if action_uncertainty is not None and uncertainty_weight != 0:
+        uncertainty = action_uncertainty.clamp_min(0)
+        uncertainty = uncertainty / (uncertainty.detach().mean() + 1e-6)
+        scale = scale / (1 + uncertainty_weight * uncertainty)
+    return scale.clamp(min_scale, max_scale)
 
 
 def _load_model_params(model_name: str):
@@ -119,6 +141,10 @@ def main(args: argparse.Namespace):
     guidance_min = args.guidance_min if args.guidance_min is not None else model_params.get("goal_guidance_min", 1.0)
     guidance_max = args.guidance_max if args.guidance_max is not None else model_params.get("goal_guidance_max", 1.0)
     guidance_power = args.guidance_power if args.guidance_power is not None else model_params.get("goal_guidance_power", 1.0)
+    use_adaptive_guidance = model_params.get("use_adaptive_guidance", True)
+    guidance_confidence_weight = model_params.get("guidance_confidence_weight", 0.35)
+    guidance_uncertainty_weight = model_params.get("guidance_uncertainty_weight", 0.25)
+    guidance_distance_scale = max(float(model_params.get("guidance_distance_scale", 10.0)), 1e-6)
 
     topomap_dir = os.path.join(TOPOMAP_IMAGES_DIR, args.dir)
     topomap_filenames = sorted(os.listdir(topomap_dir), key=lambda x: int(os.path.splitext(x)[0]))
@@ -178,6 +204,7 @@ def main(args: argparse.Namespace):
                 closest_node = min_idx + start
                 print("closest node:", closest_node)
                 sg_idx = min(min_idx + int(dists[min_idx] < args.close_threshold), len(obsgoal_cond) - 1)
+                goal_confidence = float(np.exp(-max(float(dists[sg_idx]), 0.0) / guidance_distance_scale))
                 cond_obs_cond = obsgoal_cond[sg_idx].unsqueeze(0)
                 selected_goal_img = goal_image[sg_idx].unsqueeze(0)
                 no_goal_mask = torch.ones(1, dtype=torch.long, device=device)
@@ -219,6 +246,12 @@ def main(args: argparse.Namespace):
                         guidance_min,
                         guidance_max,
                         guidance_power,
+                        goal_confidence=goal_confidence if use_adaptive_guidance else None,
+                        action_uncertainty=naction.var(dim=0, unbiased=False).mean().reshape(1)
+                        if use_adaptive_guidance and args.num_samples > 1
+                        else None,
+                        confidence_weight=guidance_confidence_weight,
+                        uncertainty_weight=guidance_uncertainty_weight,
                     )
                     noise_pred = unconditional_noise + guidance_scale * (conditional_noise - unconditional_noise)
                     naction = noise_scheduler.step(model_output=noise_pred, timestep=k, sample=naction).prev_sample

@@ -43,6 +43,10 @@ def _compute_losses_nomad(
     guidance_scale_min: float = 0.25,
     guidance_scale_max: float = 1.75,
     guidance_scale_power: float = 1.5,
+    use_adaptive_guidance: bool = True,
+    guidance_confidence_weight: float = 0.35,
+    guidance_uncertainty_weight: float = 0.25,
+    guidance_distance_scale: float = 10.0,
     generator: Optional[torch.Generator] = None,
 ):
     """
@@ -67,6 +71,10 @@ def _compute_losses_nomad(
         guidance_scale_min=guidance_scale_min,
         guidance_scale_max=guidance_scale_max,
         guidance_scale_power=guidance_scale_power,
+        use_adaptive_guidance=use_adaptive_guidance,
+        guidance_confidence_weight=guidance_confidence_weight,
+        guidance_uncertainty_weight=guidance_uncertainty_weight,
+        guidance_distance_scale=guidance_distance_scale,
         generator=generator,
     )
     uc_actions = model_output_dict['uc_actions']
@@ -120,6 +128,57 @@ def _compute_losses_nomad(
     return results
 
 
+def _compute_navigation_aux_loss(
+    aux_outputs,
+    goal_pos: torch.Tensor,
+    distance: torch.Tensor,
+    goal_mask: torch.Tensor,
+    negative_distance_threshold: float,
+    goal_pos_weight: float,
+    contrastive_weight: float,
+    contrastive_temperature: float,
+):
+    if aux_outputs is None:
+        zero = goal_pos.new_tensor(0.0)
+        return zero, {"nav_goal_pos_loss": zero, "nav_contrastive_loss": zero}
+
+    valid_goal_mask = (
+        (1 - goal_mask.float()) * (distance.float() < negative_distance_threshold).float()
+    )
+    denom = valid_goal_mask.sum() + 1e-2
+
+    goal_pos_pred = aux_outputs.get("goal_pos_pred")
+    if goal_pos_pred is not None and goal_pos_weight != 0:
+        goal_pos_loss = F.mse_loss(goal_pos_pred, goal_pos, reduction="none").mean(dim=-1)
+        goal_pos_loss = (goal_pos_loss * valid_goal_mask).sum() / denom
+    else:
+        goal_pos_loss = goal_pos.new_tensor(0.0)
+
+    contrastive_loss = goal_pos.new_tensor(0.0)
+    obs_embedding = aux_outputs.get("obs_nav_embedding")
+    goal_embedding = aux_outputs.get("goal_nav_embedding")
+    pos_idx = torch.nonzero(valid_goal_mask > 0, as_tuple=False).flatten()
+    if (
+        obs_embedding is not None
+        and goal_embedding is not None
+        and contrastive_weight != 0
+        and pos_idx.numel() > 1
+    ):
+        obs_embedding = F.normalize(obs_embedding.index_select(0, pos_idx), dim=-1)
+        goal_embedding = F.normalize(goal_embedding.index_select(0, pos_idx), dim=-1)
+        logits = obs_embedding @ goal_embedding.T / max(float(contrastive_temperature), 1e-6)
+        labels = torch.arange(logits.shape[0], device=logits.device)
+        contrastive_loss = 0.5 * (
+            F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)
+        )
+
+    aux_loss = goal_pos_weight * goal_pos_loss + contrastive_weight * contrastive_loss
+    return aux_loss, {
+        "nav_goal_pos_loss": goal_pos_loss.detach(),
+        "nav_contrastive_loss": contrastive_loss.detach(),
+    }
+
+
 def train_nomad(
     model: nn.Module,
     ema_model: EMAModel,
@@ -131,6 +190,7 @@ def train_nomad(
     goal_mask_prob: float,
     project_folder: str,
     epoch: int,
+    train_stage: str = "finetune",
     alpha: float = 1e-4,
     print_log_freq: int = 100,
     wandb_log_freq: int = 10,
@@ -140,6 +200,14 @@ def train_nomad(
     goal_guidance_min: float = 0.25,
     goal_guidance_max: float = 1.75,
     goal_guidance_power: float = 1.5,
+    use_adaptive_guidance: bool = True,
+    guidance_confidence_weight: float = 0.35,
+    guidance_uncertainty_weight: float = 0.25,
+    guidance_distance_scale: float = 10.0,
+    nav_goal_pos_loss_weight: float = 0.05,
+    nav_contrastive_loss_weight: float = 0.01,
+    nav_contrastive_temperature: float = 0.1,
+    aux_negative_distance_threshold: float = 20.0,
     max_grad_norm: Optional[float] = None,
 ):
     """
@@ -221,12 +289,14 @@ def train_nomad(
             batch_obs_images = torch.cat(batch_obs_images, dim=1).to(device, non_blocking=non_blocking)
             batch_goal_images = transform(goal_image).to(device, non_blocking=non_blocking)
             action_mask = action_mask.to(device, non_blocking=non_blocking)
+            goal_pos = goal_pos.float().to(device, non_blocking=non_blocking)
 
             B = actions.shape[0]
 
             # Generate random goal mask
             goal_mask = (torch.rand((B,)) < goal_mask_prob).long().to(device, non_blocking=non_blocking)
             obsgoal_cond = model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=goal_mask)
+            aux_outputs = model("vision_aux")
             
             # Get distance label
             distance = distance.float().to(device, non_blocking=non_blocking)
@@ -248,22 +318,16 @@ def train_nomad(
             dist_loss = (dist_loss_per_sample * valid_dist_mask).sum() / (
                 valid_dist_mask.sum() + 1e-2
             )
-
-            # Sample noise to add to actions：为每条轨迹采样高斯噪声
-            noise = torch.randn(naction.shape, device=device)
-
-            # Sample a diffusion iteration for each data point：每个样本随机选择一个时间步
-            timesteps = torch.randint(
-                0, noise_scheduler.config.num_train_timesteps,
-                (B,), device=device
-            ).long()
-
-            # Add noise：根据对应时间步的噪声水平，把轨迹从“干净”推到“噪声域”
-            noisy_action = noise_scheduler.add_noise(
-                naction, noise, timesteps)
-            
-            # 预测噪声残差，使得在该时间步可以从 noisy_action 恢复出原始 clean action
-            noise_pred = model("noise_pred_net", sample=noisy_action, timestep=timesteps, global_cond=obsgoal_cond)
+            nav_aux_loss, nav_aux_logs = _compute_navigation_aux_loss(
+                aux_outputs,
+                goal_pos,
+                distance,
+                goal_mask,
+                aux_negative_distance_threshold,
+                nav_goal_pos_loss_weight,
+                nav_contrastive_loss_weight,
+                nav_contrastive_temperature,
+            )
 
             def action_reduce(unreduced_loss: torch.Tensor):
                 # Reduce over non-batch dimensions to get loss per batch element
@@ -272,11 +336,33 @@ def train_nomad(
                 assert unreduced_loss.shape == action_mask.shape, f"{unreduced_loss.shape} != {action_mask.shape}"
                 return (unreduced_loss * action_mask).mean() / (action_mask.mean() + 1e-2)
 
-            # L2 loss：在时间和维度上求平均，再用 action_mask 做样本级加权
-            diffusion_loss = action_reduce(F.mse_loss(noise_pred, noise, reduction="none"))
+            if train_stage == "representation_warmup":
+                diffusion_loss = naction.new_tensor(0.0)
+            else:
+                # Sample noise to add to actions：为每条轨迹采样高斯噪声
+                noise = torch.randn(naction.shape, device=device)
+
+                # Sample a diffusion iteration for each data point：每个样本随机选择一个时间步
+                timesteps = torch.randint(
+                    0, noise_scheduler.config.num_train_timesteps,
+                    (B,), device=device
+                ).long()
+
+                # Add noise：根据对应时间步的噪声水平，把轨迹从“干净”推到“噪声域”
+                noisy_action = noise_scheduler.add_noise(
+                    naction, noise, timesteps)
+                
+                # 预测噪声残差，使得在该时间步可以从 noisy_action 恢复出原始 clean action
+                noise_pred = model("noise_pred_net", sample=noisy_action, timestep=timesteps, global_cond=obsgoal_cond)
+
+                # L2 loss：在时间和维度上求平均，再用 action_mask 做样本级加权
+                diffusion_loss = action_reduce(F.mse_loss(noise_pred, noise, reduction="none"))
             
             # Total loss：距离与扩散损失的加权和
-            loss = alpha * dist_loss + (1-alpha) * diffusion_loss
+            if train_stage == "representation_warmup":
+                loss = dist_loss + nav_aux_loss
+            else:
+                loss = alpha * dist_loss + (1-alpha) * diffusion_loss + nav_aux_loss
 
             # 反向传播并更新参数
             optimizer.zero_grad(set_to_none=True)
@@ -298,6 +384,9 @@ def train_nomad(
                     "total_loss": loss_cpu,
                     "dist_loss": dist_loss.item(),
                     "diffusion_loss": diffusion_loss.item(),
+                    "nav_aux_loss": nav_aux_loss.item(),
+                    "nav_goal_pos_loss": nav_aux_logs["nav_goal_pos_loss"].item(),
+                    "nav_contrastive_loss": nav_aux_logs["nav_contrastive_loss"].item(),
                 }
 
 
@@ -317,6 +406,10 @@ def train_nomad(
                                 guidance_scale_min=goal_guidance_min,
                                 guidance_scale_max=goal_guidance_max,
                                 guidance_scale_power=goal_guidance_power,
+                                use_adaptive_guidance=use_adaptive_guidance,
+                                guidance_confidence_weight=guidance_confidence_weight,
+                                guidance_uncertainty_weight=guidance_uncertainty_weight,
+                                guidance_distance_scale=guidance_distance_scale,
                             )
                 if ema_was_training:
                     ema_eval_model.train()
@@ -362,6 +455,10 @@ def train_nomad(
                         goal_guidance_min=goal_guidance_min,
                         goal_guidance_max=goal_guidance_max,
                         goal_guidance_power=goal_guidance_power,
+                        use_adaptive_guidance=use_adaptive_guidance,
+                        guidance_confidence_weight=guidance_confidence_weight,
+                        guidance_uncertainty_weight=guidance_uncertainty_weight,
+                        guidance_distance_scale=guidance_distance_scale,
                     )
                 if ema_was_training:
                     ema_eval_model.train()
@@ -386,6 +483,10 @@ def evaluate_nomad(
     goal_guidance_min: float = 0.25,
     goal_guidance_max: float = 1.75,
     goal_guidance_power: float = 1.5,
+    use_adaptive_guidance: bool = True,
+    guidance_confidence_weight: float = 0.35,
+    guidance_uncertainty_weight: float = 0.25,
+    guidance_distance_scale: float = 10.0,
 ):
     """
     Evaluate the model on the given evaluation dataset.
@@ -553,6 +654,10 @@ def evaluate_nomad(
                                 guidance_scale_min=goal_guidance_min,
                                 guidance_scale_max=goal_guidance_max,
                                 guidance_scale_power=goal_guidance_power,
+                                use_adaptive_guidance=use_adaptive_guidance,
+                                guidance_confidence_weight=guidance_confidence_weight,
+                                guidance_uncertainty_weight=guidance_uncertainty_weight,
+                                guidance_distance_scale=guidance_distance_scale,
                                 generator=eval_generator,
                             )
                     
@@ -594,6 +699,10 @@ def evaluate_nomad(
                         goal_guidance_min=goal_guidance_min,
                         goal_guidance_max=goal_guidance_max,
                         goal_guidance_power=goal_guidance_power,
+                        use_adaptive_guidance=use_adaptive_guidance,
+                        guidance_confidence_weight=guidance_confidence_weight,
+                        guidance_uncertainty_weight=guidance_uncertainty_weight,
+                        guidance_distance_scale=guidance_distance_scale,
                         generator=eval_generator,
                     )
 
@@ -643,12 +752,51 @@ def diffusion_guidance_scale(
     min_scale: float = 0.25,
     max_scale: float = 1.75,
     power: float = 1.5,
-) -> float:
-    """前期更接近无条件分支，后期增强目标 guidance。"""
+    goal_confidence: Optional[torch.Tensor] = None,
+    action_uncertainty: Optional[torch.Tensor] = None,
+    confidence_weight: float = 0.0,
+    uncertainty_weight: float = 0.0,
+):
+    """前期更接近无条件分支，后期增强目标 guidance，可叠加置信度/不确定性自适应项。"""
     if total_steps <= 1:
-        return max_scale
-    progress = step_idx / float(total_steps - 1)
-    return min_scale + (max_scale - min_scale) * (progress ** power)
+        base_scale = max_scale
+    else:
+        progress = step_idx / float(total_steps - 1)
+        base_scale = min_scale + (max_scale - min_scale) * (progress ** power)
+
+    if goal_confidence is None and action_uncertainty is None:
+        return base_scale
+
+    scale = torch.full_like(
+        goal_confidence if goal_confidence is not None else action_uncertainty,
+        float(base_scale),
+    )
+
+    if goal_confidence is not None and confidence_weight != 0:
+        confidence = goal_confidence.clamp(0, 1)
+        scale = scale * (1 + confidence_weight * (2 * confidence - 1))
+
+    if action_uncertainty is not None and uncertainty_weight != 0:
+        uncertainty = action_uncertainty.clamp_min(0)
+        uncertainty = uncertainty / (uncertainty.detach().mean() + 1e-6)
+        scale = scale / (1 + uncertainty_weight * uncertainty)
+
+    return scale.clamp(min_scale, max_scale)
+
+
+def _repeat_group_stat(stat: torch.Tensor, num_samples: int) -> torch.Tensor:
+    if num_samples <= 1:
+        return stat
+    return stat.repeat_interleave(num_samples, dim=0)
+
+
+def _sample_uncertainty(diffusion_output: torch.Tensor, num_samples: int) -> Optional[torch.Tensor]:
+    if num_samples <= 1:
+        return None
+    batch_size = diffusion_output.shape[0] // num_samples
+    grouped = diffusion_output.reshape(batch_size, num_samples, *diffusion_output.shape[1:])
+    uncertainty = grouped.var(dim=1, unbiased=False).mean(dim=tuple(range(1, grouped.dim() - 1)))
+    return uncertainty.repeat_interleave(num_samples, dim=0)
 
 
 def model_output(
@@ -663,6 +811,10 @@ def model_output(
     guidance_scale_min: float = 0.25,
     guidance_scale_max: float = 1.75,
     guidance_scale_power: float = 1.5,
+    use_adaptive_guidance: bool = True,
+    guidance_confidence_weight: float = 0.35,
+    guidance_uncertainty_weight: float = 0.25,
+    guidance_distance_scale: float = 10.0,
     generator: Optional[torch.Generator] = None,
 ):
     noise_scheduler.set_timesteps(noise_scheduler.config.num_train_timesteps)
@@ -674,8 +826,13 @@ def model_output(
 
     no_mask = torch.zeros((batch_goal_images.shape[0],)).long().to(device)
     obsgoal_cond = model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=no_mask)
+    gc_distance_base = model("dist_pred_net", obsgoal_cond=obsgoal_cond).flatten()
     # obsgoal_cond = obsgoal_cond.flatten(start_dim=1)  
     obsgoal_cond = obsgoal_cond.repeat_interleave(num_samples, dim=0)
+    goal_confidence = torch.exp(
+        -gc_distance_base.float().clamp_min(0) / max(float(guidance_distance_scale), 1e-6)
+    )
+    goal_confidence = _repeat_group_stat(goal_confidence, num_samples)
 
     # initialize action from Gaussian noise
     if generator is None:
@@ -738,7 +895,15 @@ def model_output(
             guidance_scale_min,
             guidance_scale_max,
             guidance_scale_power,
+            goal_confidence=goal_confidence if use_adaptive_guidance else None,
+            action_uncertainty=_sample_uncertainty(diffusion_output, num_samples)
+            if use_adaptive_guidance
+            else None,
+            confidence_weight=guidance_confidence_weight,
+            uncertainty_weight=guidance_uncertainty_weight,
         )
+        if torch.is_tensor(guidance_scale):
+            guidance_scale = guidance_scale.reshape(-1, 1, 1)
         noise_pred = unconditional_noise + guidance_scale * (
             conditional_noise - unconditional_noise
         )
@@ -780,6 +945,10 @@ def visualize_diffusion_action_distribution(
     goal_guidance_min: float = 0.25,
     goal_guidance_max: float = 1.75,
     goal_guidance_power: float = 1.5,
+    use_adaptive_guidance: bool = True,
+    guidance_confidence_weight: float = 0.35,
+    guidance_uncertainty_weight: float = 0.25,
+    guidance_distance_scale: float = 10.0,
     generator: Optional[torch.Generator] = None,
 ):
     """Plot samples from the exploration model."""
@@ -828,6 +997,10 @@ def visualize_diffusion_action_distribution(
             guidance_scale_min=goal_guidance_min,
             guidance_scale_max=goal_guidance_max,
             guidance_scale_power=goal_guidance_power,
+            use_adaptive_guidance=use_adaptive_guidance,
+            guidance_confidence_weight=guidance_confidence_weight,
+            guidance_uncertainty_weight=guidance_uncertainty_weight,
+            guidance_distance_scale=guidance_distance_scale,
             generator=generator,
         )
         uc_actions_list.append(to_numpy(model_output_dict['uc_actions']))

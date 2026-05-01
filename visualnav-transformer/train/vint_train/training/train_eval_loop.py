@@ -68,6 +68,7 @@ def train_eval_loop_nomad(
     epochs: int,
     device: torch.device,
     project_folder: str,
+    train_stage: str = "finetune",
     print_log_freq: int = 100,
     wandb_log_freq: int = 10,
     image_log_freq: int = 1000,
@@ -81,6 +82,14 @@ def train_eval_loop_nomad(
     goal_guidance_min: float = 0.25,
     goal_guidance_max: float = 1.75,
     goal_guidance_power: float = 1.5,
+    use_adaptive_guidance: bool = True,
+    guidance_confidence_weight: float = 0.35,
+    guidance_uncertainty_weight: float = 0.25,
+    guidance_distance_scale: float = 10.0,
+    nav_goal_pos_loss_weight: float = 0.05,
+    nav_contrastive_loss_weight: float = 0.01,
+    nav_contrastive_temperature: float = 0.1,
+    aux_negative_distance_threshold: float = 20.0,
     max_grad_norm: Optional[float] = None,
 ):
     latest_path = os.path.join(project_folder, "latest.pth")
@@ -105,6 +114,7 @@ def train_eval_loop_nomad(
                 goal_mask_prob=goal_mask_prob,
                 project_folder=project_folder,
                 epoch=epoch,
+                train_stage=train_stage,
                 print_log_freq=print_log_freq,
                 wandb_log_freq=wandb_log_freq,
                 image_log_freq=image_log_freq,
@@ -114,6 +124,14 @@ def train_eval_loop_nomad(
                 goal_guidance_min=goal_guidance_min,
                 goal_guidance_max=goal_guidance_max,
                 goal_guidance_power=goal_guidance_power,
+                use_adaptive_guidance=use_adaptive_guidance,
+                guidance_confidence_weight=guidance_confidence_weight,
+                guidance_uncertainty_weight=guidance_uncertainty_weight,
+                guidance_distance_scale=guidance_distance_scale,
+                nav_goal_pos_loss_weight=nav_goal_pos_loss_weight,
+                nav_contrastive_loss_weight=nav_contrastive_loss_weight,
+                nav_contrastive_temperature=nav_contrastive_temperature,
+                aux_negative_distance_threshold=aux_negative_distance_threshold,
                 max_grad_norm=max_grad_norm,
             )
             if lr_scheduler is not None:
@@ -170,6 +188,10 @@ def train_eval_loop_nomad(
                     goal_guidance_min=goal_guidance_min,
                     goal_guidance_max=goal_guidance_max,
                     goal_guidance_power=goal_guidance_power,
+                    use_adaptive_guidance=use_adaptive_guidance,
+                    guidance_confidence_weight=guidance_confidence_weight,
+                    guidance_uncertainty_weight=guidance_uncertainty_weight,
+                    guidance_distance_scale=guidance_distance_scale,
                 )
 
         if use_wandb:
