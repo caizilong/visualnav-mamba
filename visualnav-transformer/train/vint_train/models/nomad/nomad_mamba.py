@@ -12,6 +12,7 @@ from .mamba2 import Mamba2, MambaConfig
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_seq_len=6):
         super().__init__()
+        self.d_model = d_model
         pos_enc = torch.zeros(max_seq_len, d_model)
         pos = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(
@@ -23,7 +24,22 @@ class PositionalEncoding(nn.Module):
         self.register_buffer("pos_enc", pos_enc)
 
     def forward(self, x):
-        return x + self.pos_enc[:, : x.size(1), :]
+        if x.size(1) <= self.pos_enc.size(1):
+            pos_enc = self.pos_enc[:, : x.size(1), :]
+        else:
+            pos_enc = self._build_pos_enc(x.size(1), x.device)
+        return x + pos_enc.to(dtype=x.dtype)
+
+    def _build_pos_enc(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        pos_enc = torch.zeros(seq_len, self.d_model, device=device)
+        pos = torch.arange(0, seq_len, dtype=torch.float, device=device).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, self.d_model, 2, device=device).float()
+            * (-math.log(10000.0) / self.d_model)
+        )
+        pos_enc[:, 0::2] = torch.sin(pos * div_term)
+        pos_enc[:, 1::2] = torch.cos(pos * div_term)
+        return pos_enc.unsqueeze(0)
 
 
 def replace_submodules(
@@ -179,7 +195,12 @@ def _create_timm_encoder(
     return encoder, num_features
 
 
-def _extract_features(encoder: nn.Module, x: torch.Tensor) -> torch.Tensor:
+def _extract_features(
+    encoder: nn.Module,
+    x: torch.Tensor,
+    keep_spatial_tokens: bool = False,
+    drop_prefix_tokens: bool = True,
+) -> torch.Tensor:
     """
     从 timm 编码器中提取特征，统一处理不同模型的输出格式。
     
@@ -188,18 +209,34 @@ def _extract_features(encoder: nn.Module, x: torch.Tensor) -> torch.Tensor:
     - ViT (包括 DINOv2): [B, num_tokens, dim] 或 [B, dim]
     
     Returns:
-        features: [B, num_features] 的特征向量
+        features:
+            - keep_spatial_tokens=False: [B, num_features]
+            - keep_spatial_tokens=True: [B, num_tokens, num_features]
     """
     feats = encoder.forward_features(x)
     
     if feats.ndim == 4:
-        # CNN 输出: [B, C, H, W] -> [B, C]
-        feats = F.adaptive_avg_pool2d(feats, (1, 1)).flatten(start_dim=1)
+        if keep_spatial_tokens:
+            # CNN 输出: [B, C, H, W] -> [B, H*W, C]
+            feats = feats.flatten(start_dim=2).transpose(1, 2)
+        else:
+            # CNN 输出: [B, C, H, W] -> [B, C]
+            feats = F.adaptive_avg_pool2d(feats, (1, 1)).flatten(start_dim=1)
     elif feats.ndim == 3:
         # ViT 输出: [B, num_tokens, dim]
-        # 通常第一个 token 是 CLS token，或者做平均池化
-        # 这里使用平均池化以保持通用性
-        feats = feats.mean(dim=1)  # [B, dim]
+        if keep_spatial_tokens:
+            if drop_prefix_tokens:
+                num_prefix_tokens = int(getattr(encoder, "num_prefix_tokens", 0))
+                if num_prefix_tokens == 0 and hasattr(encoder, "cls_token"):
+                    num_prefix_tokens = 1
+                if 0 < num_prefix_tokens < feats.shape[1]:
+                    feats = feats[:, num_prefix_tokens:, :]
+        else:
+            # 通常第一个 token 是 CLS token，或者做平均池化
+            # 这里使用平均池化以保持通用性
+            feats = feats.mean(dim=1)  # [B, dim]
+    elif feats.ndim == 2 and keep_spatial_tokens:
+        feats = feats.unsqueeze(1)
     # 如果 feats.ndim == 2，已经是 [B, dim] 格式，无需处理
     
     return feats
@@ -246,6 +283,8 @@ class NoMaD_Mamba(nn.Module):
         adapter_scale: float = 0.1,
         use_navigation_aux: bool = True,
         nav_aux_hidden_dim: Optional[int] = None,
+        use_spatial_mamba_tokens: bool = False,
+        drop_backbone_prefix_tokens: bool = True,
     ) -> None:
         super().__init__()
 
@@ -269,6 +308,8 @@ class NoMaD_Mamba(nn.Module):
         )
         self.share_visual_backbone = share_visual_backbone
         self.use_navigation_aux = use_navigation_aux
+        self.use_spatial_mamba_tokens = use_spatial_mamba_tokens
+        self.drop_backbone_prefix_tokens = drop_backbone_prefix_tokens
         self._last_aux_outputs = None
 
         # 如果未指定 goal_encoder，则使用与 obs_encoder 相同的类型
@@ -460,7 +501,12 @@ class NoMaD_Mamba(nn.Module):
         if goal_encoding is None:
             if goal_img is None:
                 raise ValueError("Either goal_img or goal_encoding must be provided.")
-            goal_encoding = _extract_features(self.goal_encoder, goal_img)
+            goal_encoding = _extract_features(
+                self.goal_encoder,
+                goal_img,
+                keep_spatial_tokens=self.use_spatial_mamba_tokens,
+                drop_prefix_tokens=self.drop_backbone_prefix_tokens,
+            )
         goal_encoding = self.compress_goal_enc(goal_encoding)
         goal_encoding = self.goal_adapter(goal_encoding)
         if self.use_goal_gate:
@@ -470,7 +516,9 @@ class NoMaD_Mamba(nn.Module):
             fused_goal = goal_encoding + goal_gate * goal_delta
         else:
             fused_goal = goal_encoding
-        return fused_goal.unsqueeze(1)
+        if fused_goal.ndim == 2:
+            return fused_goal.unsqueeze(1)
+        return fused_goal
 
     def _apply_goal_modulation(
         self,
@@ -479,13 +527,26 @@ class NoMaD_Mamba(nn.Module):
     ) -> torch.Tensor:
         if not self.use_goal_film:
             return obs_encoding
-        goal_context = goal_token.expand(-1, obs_encoding.shape[1], -1)
+        if obs_encoding.ndim == 4:
+            goal_context = goal_token.unsqueeze(1).expand(
+                -1,
+                obs_encoding.shape[1],
+                -1,
+                -1,
+            )
+        else:
+            goal_context = goal_token.expand(-1, obs_encoding.shape[1], -1)
         pair_features = self._make_pair_features(obs_encoding, goal_context)
         modulation = self.obs_goal_modulation(pair_features.reshape(-1, pair_features.shape[-1]))
-        modulation = modulation.reshape(obs_encoding.shape[0], obs_encoding.shape[1], -1)
+        modulation = modulation.reshape(*obs_encoding.shape[:-1], -1)
         scale, bias = torch.chunk(modulation, 2, dim=-1)
         # 使用较小幅度的 FiLM 调制，避免训练初期破坏原始视觉表示。
         return obs_encoding * (1 + 0.1 * torch.tanh(scale)) + 0.1 * bias
+
+    def _summarize_goal_token(self, goal_token: torch.Tensor) -> torch.Tensor:
+        if goal_token.ndim == 3 and goal_token.shape[1] != 1:
+            return goal_token.mean(dim=1, keepdim=True)
+        return goal_token
 
     def _direction_weights(
         self,
@@ -520,6 +581,33 @@ class NoMaD_Mamba(nn.Module):
         pool_weights = F.softmax(pool_logits, dim=1).unsqueeze(-1)
         return (x * pool_weights).sum(dim=1)
 
+    def _apply_mamba_stack(
+        self,
+        x: torch.Tensor,
+        goal_token: torch.Tensor,
+        goal_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if self.bidirectional_mamba:
+            for layer_idx, (layer, norm) in enumerate(zip(self.mamba_layers, self.mamba_norms)):
+                forward_delta = layer(norm(x))
+                x_reversed = torch.flip(x, dims=[1])
+                backward_delta = self.mamba_layers_backward[layer_idx](
+                    self.mamba_norms_backward[layer_idx](x_reversed)
+                )
+                backward_delta = torch.flip(backward_delta, dims=[1])
+                if self.use_goal_mamba_fusion:
+                    direction_weights = self._direction_weights(x, goal_token, goal_mask)
+                    x = x + (
+                        direction_weights[..., 0:1] * forward_delta
+                        + direction_weights[..., 1:2] * backward_delta
+                    )
+                else:
+                    x = x + 0.5 * (forward_delta + backward_delta)
+        else:
+            for layer, norm in zip(self.mamba_layers, self.mamba_norms):
+                x = x + layer(norm(x))
+        return x
+
     def forward(
         self,
         obs_img: torch.Tensor,
@@ -551,78 +639,146 @@ class NoMaD_Mamba(nn.Module):
         goal_backbone_encoding = None
         if self.share_visual_backbone:
             joint_inputs = torch.cat((obs_stack, goal_img), dim=0)
-            joint_encoding = _extract_features(self.obs_encoder, joint_inputs)
+            joint_encoding = _extract_features(
+                self.obs_encoder,
+                joint_inputs,
+                keep_spatial_tokens=self.use_spatial_mamba_tokens,
+                drop_prefix_tokens=self.drop_backbone_prefix_tokens,
+            )
             obs_encoding = joint_encoding[: obs_stack.shape[0]]
             goal_backbone_encoding = joint_encoding[obs_stack.shape[0] :]
         else:
-            obs_encoding = _extract_features(self.obs_encoder, obs_stack)
+            obs_encoding = _extract_features(
+                self.obs_encoder,
+                obs_stack,
+                keep_spatial_tokens=self.use_spatial_mamba_tokens,
+                drop_prefix_tokens=self.drop_backbone_prefix_tokens,
+            )
         obs_encoding = self.compress_obs_enc(obs_encoding)
         obs_encoding = self.obs_adapter(obs_encoding)
 
         # 形状恢复为 [B, context_size+1, C]，并拼接 goal token 得到序列
-        obs_encoding = obs_encoding.unsqueeze(1)
-        obs_encoding = obs_encoding.reshape(
-            (self.context_size + 1, -1, self.obs_encoding_size)
-        )
-        obs_encoding = torch.transpose(obs_encoding, 0, 1)  # [B, context_size+1, C]
+        if self.use_spatial_mamba_tokens:
+            spatial_tokens = obs_encoding.shape[1]
+            obs_encoding = obs_encoding.reshape(
+                (self.context_size + 1, -1, spatial_tokens, self.obs_encoding_size)
+            )
+            obs_encoding = torch.transpose(obs_encoding, 0, 1)  # [B, context_size+1, S, C]
+        else:
+            spatial_tokens = 1
+            obs_encoding = obs_encoding.unsqueeze(1)
+            obs_encoding = obs_encoding.reshape(
+                (self.context_size + 1, -1, self.obs_encoding_size)
+            )
+            obs_encoding = torch.transpose(obs_encoding, 0, 1)  # [B, context_size+1, C]
 
         # ------- 2) 目标编码：单独编码 goal，再与当前观察帧做门控融合 -------
-        current_obs_token = obs_encoding[:, -1, :]
+        current_obs_token = obs_encoding[:, -1, :, :] if self.use_spatial_mamba_tokens else obs_encoding[:, -1, :]
         goal_encoding = self._encode_goal_token(
             current_obs_token,
             goal_img=goal_img,
             goal_encoding=goal_backbone_encoding,
-        )  # [B, 1, C]
+        )  # [B, 1, C] or [B, S, C]
+        if self.use_spatial_mamba_tokens and goal_encoding.shape[1] != spatial_tokens:
+            raise ValueError(
+                "Spatial token mode requires obs and goal encoders to produce the "
+                f"same token count, got obs={spatial_tokens}, goal={goal_encoding.shape[1]}."
+            )
+        goal_summary = self._summarize_goal_token(goal_encoding)
         goal_conditioned_obs = self._apply_goal_modulation(obs_encoding, goal_encoding)
 
         # ------- 3) 处理 goal mask -------
         if goal_mask is not None:
             no_goal_mask = goal_mask.long()  # 0 or 1
-            goal_mask_expand = goal_mask.float().unsqueeze(1).unsqueeze(2)  # [B, 1, 1]
+            if self.use_spatial_mamba_tokens:
+                goal_mask_expand = goal_mask.float().unsqueeze(1).unsqueeze(2)  # [B, 1, 1]
+                obs_goal_mask_expand = goal_mask.float().view(-1, 1, 1, 1)
+            else:
+                goal_mask_expand = goal_mask.float().unsqueeze(1).unsqueeze(2)  # [B, 1, 1]
+                obs_goal_mask_expand = goal_mask_expand
             goal_encoding = goal_encoding * (1 - goal_mask_expand)
-            obs_encoding = obs_encoding + (1 - goal_mask_expand) * (goal_conditioned_obs - obs_encoding)
-            src_key_padding_mask = torch.index_select(
-                self.all_masks, 0, no_goal_mask
-            )  # [B, seq_len]
+            goal_summary = self._summarize_goal_token(goal_encoding)
+            obs_encoding = obs_encoding + (1 - obs_goal_mask_expand) * (goal_conditioned_obs - obs_encoding)
+            if self.use_spatial_mamba_tokens:
+                seq_len = (self.context_size + 2) * spatial_tokens
+                src_key_padding_mask = torch.zeros(
+                    (obs_encoding.shape[0], seq_len),
+                    dtype=torch.bool,
+                    device=device,
+                )
+                src_key_padding_mask[goal_mask.bool(), -spatial_tokens:] = True
+            else:
+                src_key_padding_mask = torch.index_select(
+                    self.all_masks, 0, no_goal_mask
+                )  # [B, seq_len]
         else:
             obs_encoding = goal_conditioned_obs
             src_key_padding_mask = None
 
-        tokens = torch.cat((obs_encoding, goal_encoding), dim=1)  # [B, context_size+2, C]
+        if self.use_spatial_mamba_tokens:
+            goal_sequence = goal_encoding.unsqueeze(1)  # [B, 1, S, C]
+            tokens = torch.cat((obs_encoding, goal_sequence), dim=1)
+            tokens = tokens.reshape(tokens.shape[0], -1, self.obs_encoding_size)
+            num_goal_sequence_tokens = spatial_tokens
+        else:
+            tokens = torch.cat((obs_encoding, goal_encoding), dim=1)  # [B, context_size+2, C]
+            num_goal_sequence_tokens = 1
 
         # ------- 4) 位置编码 + 双向目标感知 Mamba2 序列建模 -------
-        x = tokens
-        if self.positional_encoding is not None:
-            x = self.positional_encoding(x)
-
-        # Pre-LN 残差：前向 Mamba 负责历史累积，反向 Mamba 将末端 goal 信息传播回观察序列。
-        if self.bidirectional_mamba:
-            for layer_idx, (layer, norm) in enumerate(zip(self.mamba_layers, self.mamba_norms)):
-                forward_delta = layer(norm(x))
-                x_reversed = torch.flip(x, dims=[1])
-                backward_delta = self.mamba_layers_backward[layer_idx](
-                    self.mamba_norms_backward[layer_idx](x_reversed)
-                )
-                backward_delta = torch.flip(backward_delta, dims=[1])
-                if self.use_goal_mamba_fusion:
-                    direction_weights = self._direction_weights(x, goal_encoding, goal_mask)
-                    x = x + (
-                        direction_weights[..., 0:1] * forward_delta
-                        + direction_weights[..., 1:2] * backward_delta
-                    )
-                else:
-                    x = x + 0.5 * (forward_delta + backward_delta)
+        if goal_mask is None:
+            x = tokens
+            if self.positional_encoding is not None:
+                x = self.positional_encoding(x)
+            # Pre-LN residual stack. Forward Mamba accumulates history; backward
+            # Mamba propagates the visible terminal goal through the sequence.
+            x = self._apply_mamba_stack(x, goal_summary, goal_mask=None)
         else:
-            for layer, norm in zip(self.mamba_layers, self.mamba_norms):
-                x = x + layer(norm(x))
+            # Mamba has no padding mask. For unconditional samples, remove the
+            # masked goal token from the recurrent sequence entirely so the
+            # reversed Mamba path cannot absorb a padded/positional goal token.
+            masked_goal = goal_mask.bool()
+            visible_goal = ~masked_goal
+            x = tokens.new_zeros(tokens.shape)
+
+            if visible_goal.any():
+                visible_x = tokens[visible_goal]
+                if self.positional_encoding is not None:
+                    visible_x = self.positional_encoding(visible_x)
+                visible_x = self._apply_mamba_stack(
+                    visible_x,
+                    goal_summary[visible_goal],
+                    goal_mask=None,
+                )
+                x[visible_goal] = visible_x
+
+            if masked_goal.any():
+                masked_x = tokens[masked_goal, :-num_goal_sequence_tokens, :]
+                if self.positional_encoding is not None:
+                    masked_x = self.positional_encoding(masked_x)
+                masked_direction_mask = torch.ones(
+                    masked_x.shape[0],
+                    dtype=goal_mask.dtype,
+                    device=goal_mask.device,
+                )
+                masked_x = self._apply_mamba_stack(
+                    masked_x,
+                    goal_summary[masked_goal],
+                    goal_mask=masked_direction_mask,
+                )
+                x[masked_goal, :-num_goal_sequence_tokens, :] = masked_x
 
         # ------- 5) goal-query attention pooling，得到最终导航 embedding -------
-        obs_encoding_tokens = self._pool_tokens(x, goal_encoding, src_key_padding_mask)
+        obs_encoding_tokens = self._pool_tokens(x, goal_summary, src_key_padding_mask)
         if self.use_navigation_aux:
+            current_obs_summary = (
+                current_obs_token.mean(dim=1)
+                if current_obs_token.ndim == 3
+                else current_obs_token
+            )
             self._last_aux_outputs = {
                 "goal_pos_pred": self.goal_pos_head(obs_encoding_tokens),
-                "obs_nav_embedding": self.nav_contrast_proj(current_obs_token),
-                "goal_nav_embedding": self.nav_contrast_proj(goal_encoding.squeeze(1)),
+                "obs_nav_embedding": self.nav_contrast_proj(current_obs_summary),
+                "goal_nav_embedding": self.nav_contrast_proj(goal_summary.squeeze(1)),
             }
         else:
             self._last_aux_outputs = None

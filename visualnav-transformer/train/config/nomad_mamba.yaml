@@ -13,7 +13,7 @@ gpu_ids: [0]
 num_workers: 12
 lr: 5e-5
 use_differential_lr: true                # 对 backbone 与新加模块使用不同学习率
-backbone_lr: 5e-6                        # 预训练视觉 backbone 用更小 LR，减少全参数微调的不稳定
+backbone_lr: 3e-5                        # 预训练视觉 backbone 用更小 LR，减少全参数微调的不稳定
 optimizer: adamw
 clipping: True
 max_norm: 1.
@@ -43,6 +43,8 @@ goal_encoder: vit_small_patch16_dinov3    # 目标编码器类型；share_visual
 share_visual_backbone: true               # obs / goal 共用同一套 DINOv3 参数
 adapter_hidden_dim: 96                    # 轻量 adapter 的瓶颈维度（约为 hidden size 的 1/4）
 adapter_scale: 0.1                        # 小尺度残差注入
+use_spatial_mamba_tokens: false           # 消融开关：false=每帧全局池化1个token；true=保留空间tokens并展平成长序列送入Mamba
+drop_backbone_prefix_tokens: true         # 空间token模式下丢弃ViT的CLS/register等prefix tokens，只保留patch tokens
 bidirectional_mamba: true               # 前向/反向 Mamba 同时建模，让 goal 信息反向传播到上下文
 use_goal_gate: true                     # 是否启用当前帧与 goal 的门控融合
 use_goal_film: true                     # 是否启用 goal-aware FiLM 调制历史 observation tokens
@@ -110,20 +112,20 @@ learn_angle: False
 # ---------------- 数据集设置 ----------------
 image_size: [96, 96]
 datasets:
-  carla_dataset:
-    data_folder: /workspace/datasets/carla_dataset
-    train: vint_train/data/data_splits/carla_dataset/train/
-    test: vint_train/data/data_splits/carla_dataset/test/
-    end_slack: 3 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
-    goals_per_obs: 1 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
-    negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略  
-  # go_stanford:
-  #   data_folder: /workspace/datasets/go_stanford0
-  #   train: vint_train/data/data_splits/go_stanford0/train/
-  #   test: vint_train/data/data_splits/go_stanford0/test/
-  #   end_slack: 0 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
-  #   goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
-  #   negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略
+  # carla_dataset:
+  #   data_folder: /workspace/datasets/carla_dataset
+  #   train: vint_train/data/data_splits/carla_dataset/train/
+  #   test: vint_train/data/data_splits/carla_dataset/test/
+  #   end_slack: 3 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
+  #   goals_per_obs: 1 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
+  #   negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略  
+  go_stanford:
+    data_folder: /workspace/datasets/go_stanford
+    train: vint_train/data/data_splits/go_stanford/train/
+    test: vint_train/data/data_splits/go_stanford/test/
+    end_slack: 0 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
+    goals_per_obs: 2 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
+    negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略
   # recon:
   #   data_folder: /workspace/datasets/recon0
   #   train: vint_train/data/data_splits/recon0/train/ # path to train folder with traj_names.txt

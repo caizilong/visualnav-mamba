@@ -289,6 +289,8 @@ def main(config):
         adapter_scale=config.get("adapter_scale", 0.1),
         use_navigation_aux=config.get("use_navigation_aux", True),
         nav_aux_hidden_dim=config.get("nav_aux_hidden_dim", None),
+        use_spatial_mamba_tokens=config.get("use_spatial_mamba_tokens", False),
+        drop_backbone_prefix_tokens=config.get("drop_backbone_prefix_tokens", True),
     )
 
     noise_pred_net = ConditionalUnet1D(

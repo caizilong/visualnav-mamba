@@ -34,6 +34,8 @@ pretrained_backbone: true
 share_visual_backbone: false
 adapter_hidden_dim: 96
 adapter_scale: 0.1
+use_spatial_mamba_tokens: false
+drop_backbone_prefix_tokens: true
 bidirectional_mamba: true
 use_goal_gate: true
 use_goal_film: true
