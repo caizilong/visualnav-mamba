@@ -105,32 +105,37 @@ def _set_requires_grad(module: nn.Module, enabled: bool) -> None:
 
 
 def _apply_train_stage(config: dict, model: NoMaD) -> None:
-    train_stage = config.get("train_stage", "finetune")
-    valid_stages = {"representation_warmup", "diffusion_tuning", "finetune"}
-    if train_stage not in valid_stages:
-        raise ValueError(f"train_stage must be one of {sorted(valid_stages)}, got {train_stage}")
-
-    freeze_backbone = bool(config.get("freeze_backbone", False))
-    vision_encoder = model.vision_encoder
-
-    if freeze_backbone or train_stage in {"representation_warmup", "diffusion_tuning"}:
-        for encoder_name in ("obs_encoder", "goal_encoder"):
-            encoder = getattr(vision_encoder, encoder_name, None)
-            if encoder is not None:
-                _set_requires_grad(encoder, False)
-
-    if train_stage == "representation_warmup":
-        _set_requires_grad(model.noise_pred_net, False)
-    elif train_stage == "diffusion_tuning":
-        _set_requires_grad(model.noise_pred_net, True)
+    if config.get("ablation_unfreeze_all", False):
+        _set_requires_grad(model, True)
+        train_stage = "ablation_unfreeze_all (finetune)"
+        freeze_backbone = False
     else:
-        _set_requires_grad(model.noise_pred_net, True)
+        train_stage = config.get("train_stage", "finetune")
+        valid_stages = {"representation_warmup", "diffusion_tuning", "finetune"}
+        if train_stage not in valid_stages:
+            raise ValueError(f"train_stage must be one of {sorted(valid_stages)}, got {train_stage}")
 
-    if train_stage == "finetune" and not freeze_backbone:
-        for encoder_name in ("obs_encoder", "goal_encoder"):
-            encoder = getattr(vision_encoder, encoder_name, None)
-            if encoder is not None:
-                _set_requires_grad(encoder, True)
+        freeze_backbone = bool(config.get("freeze_backbone", False))
+        vision_encoder = model.vision_encoder
+
+        if freeze_backbone or train_stage in {"representation_warmup", "diffusion_tuning"}:
+            for encoder_name in ("obs_encoder", "goal_encoder"):
+                encoder = getattr(vision_encoder, encoder_name, None)
+                if encoder is not None:
+                    _set_requires_grad(encoder, False)
+
+        if train_stage == "representation_warmup":
+            _set_requires_grad(model.noise_pred_net, False)
+        elif train_stage == "diffusion_tuning":
+            _set_requires_grad(model.noise_pred_net, True)
+        else:
+            _set_requires_grad(model.noise_pred_net, True)
+
+        if train_stage == "finetune" and not freeze_backbone:
+            for encoder_name in ("obs_encoder", "goal_encoder"):
+                encoder = getattr(vision_encoder, encoder_name, None)
+                if encoder is not None:
+                    _set_requires_grad(encoder, True)
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -305,8 +310,6 @@ def main(config):
         noise_pred_net=noise_pred_net,
         dist_pred_net=dist_pred_network,
     )
-    _apply_train_stage(config, model)
-
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=config["num_diffusion_iters"],
         beta_schedule="squaredcos_cap_v2",
@@ -318,64 +321,6 @@ def main(config):
     if config["clipping"]:
         max_grad_norm = float(config["max_norm"])
         print("Clipping gradients by global norm:", max_grad_norm)
-
-    lr = float(config["lr"])
-    optimizer_param_groups = _build_optimizer_param_groups(config, model, lr)
-    config["optimizer"] = config["optimizer"].lower()
-    if config["optimizer"] == "adam":
-        optimizer = Adam(
-            optimizer_param_groups if optimizer_param_groups is not None else model.parameters(),
-            lr=lr,
-            betas=(0.9, 0.98),
-        )
-    elif config["optimizer"] == "adamw":
-        optimizer = AdamW(
-            optimizer_param_groups if optimizer_param_groups is not None else model.parameters(),
-            lr=lr,
-        )
-    elif config["optimizer"] == "sgd":
-        optimizer = torch.optim.SGD(
-            optimizer_param_groups if optimizer_param_groups is not None else model.parameters(),
-            lr=lr,
-            momentum=0.9,
-        )
-    else:
-        raise ValueError(f"Optimizer {config['optimizer']} not supported")
-
-    scheduler = None
-    if config["scheduler"] is not None:
-        config["scheduler"] = config["scheduler"].lower()
-        if config["scheduler"] == "cosine":
-            print("Using cosine annealing with T_max", config["epochs"])
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["epochs"])
-        elif config["scheduler"] == "cyclic":
-            print("Using cyclic LR with cycle", config["cyclic_period"])
-            scheduler = torch.optim.lr_scheduler.CyclicLR(
-                optimizer,
-                base_lr=lr / 10.0,
-                max_lr=lr,
-                step_size_up=config["cyclic_period"] // 2,
-                cycle_momentum=False,
-            )
-        elif config["scheduler"] == "plateau":
-            print("Using ReduceLROnPlateau")
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                factor=config["plateau_factor"],
-                patience=config["plateau_patience"],
-                verbose=True,
-            )
-        else:
-            raise ValueError(f"Scheduler {config['scheduler']} not supported")
-
-        if config["warmup"]:
-            print("Using warmup scheduler")
-            scheduler = GradualWarmupScheduler(
-                optimizer,
-                multiplier=1,
-                total_epoch=config["warmup_epochs"],
-                after_scheduler=scheduler,
-            )
 
     current_epoch = 0
     latest_checkpoint = None
@@ -403,84 +348,185 @@ def main(config):
         model = nn.DataParallel(model, device_ids=logical_gpu_ids)
     model = model.to(device)
 
-    if "load_run" in config:
-        def _resolve_state_dict(checkpoint_entry):
-            if checkpoint_entry is None:
-                return None
-            if hasattr(checkpoint_entry, "state_dict"):
-                return checkpoint_entry.state_dict()
-            return checkpoint_entry
+    stages = []
+    if config.get("ablation_unfreeze_all", False):
+        stages.append({
+            "name": "finetune",
+            "epochs": config.get("epochs", 100),
+            "freeze_backbone": False,
+        })
+    elif config.get("multi_stage", False):
+        stages.append({
+            "name": "representation_warmup",
+            "epochs": config.get("stage1_epochs", 10),
+            "freeze_backbone": True,
+        })
+        stages.append({
+            "name": "diffusion_tuning",
+            "epochs": config.get("stage2_epochs", 50),
+            "freeze_backbone": True,
+        })
+        stages.append({
+            "name": "finetune",
+            "epochs": config.get("stage3_epochs", 20),
+            "freeze_backbone": False,
+        })
+    else:
+        stages.append({
+            "name": config.get("train_stage", "finetune"),
+            "epochs": config.get("epochs", 100),
+            "freeze_backbone": config.get("freeze_backbone", False),
+        })
 
-        optimizer_state = None
-        scheduler_state = None
-        if isinstance(latest_checkpoint, dict):
-            optimizer_state = _resolve_state_dict(
-                latest_checkpoint.get("optimizer_state_dict", latest_checkpoint.get("optimizer"))
+    for stage_idx, stage_info in enumerate(stages):
+        stage_name = stage_info["name"]
+        stage_epochs = stage_info["epochs"]
+        
+        print(f"=== Starting Stage {stage_idx + 1}/{len(stages)}: {stage_name} for {stage_epochs} epochs ===")
+        config["train_stage"] = stage_name
+        config["freeze_backbone"] = stage_info["freeze_backbone"]
+        config["epochs"] = stage_epochs
+        
+        raw_model = model.module if hasattr(model, "module") else model
+        _apply_train_stage(config, raw_model)
+
+        lr = float(config["lr"])
+        optimizer_param_groups = _build_optimizer_param_groups(config, raw_model, lr)
+        config_optimizer = config["optimizer"].lower()
+        if config_optimizer == "adam":
+            optimizer = Adam(
+                optimizer_param_groups if optimizer_param_groups is not None else raw_model.parameters(),
+                lr=lr,
+                betas=(0.9, 0.98),
             )
-            scheduler_state = _resolve_state_dict(
-                latest_checkpoint.get("scheduler_state_dict", latest_checkpoint.get("scheduler"))
+        elif config_optimizer == "adamw":
+            optimizer = AdamW(
+                optimizer_param_groups if optimizer_param_groups is not None else raw_model.parameters(),
+                lr=lr,
             )
+        elif config_optimizer == "sgd":
+            optimizer = torch.optim.SGD(
+                optimizer_param_groups if optimizer_param_groups is not None else raw_model.parameters(),
+                lr=lr,
+                momentum=0.9,
+            )
+        else:
+            raise ValueError(f"Optimizer {config_optimizer} not supported")
 
-        load_project_folder = os.path.join("logs", config["load_run"])
-        if optimizer_state is None:
-            optimizer_latest_path = os.path.join(load_project_folder, "optimizer_latest.pth")
-            if os.path.exists(optimizer_latest_path):
-                optimizer_state = torch.load(optimizer_latest_path, map_location="cpu")
-        if scheduler is not None and scheduler_state is None:
-            scheduler_latest_path = os.path.join(load_project_folder, "scheduler_latest.pth")
-            if os.path.exists(scheduler_latest_path):
-                scheduler_state = torch.load(scheduler_latest_path, map_location="cpu")
+        scheduler = None
+        if config["scheduler"] is not None:
+            config_scheduler = config["scheduler"].lower()
+            if config_scheduler == "cosine":
+                print("Using cosine annealing with T_max", stage_epochs)
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=stage_epochs)
+            elif config_scheduler == "cyclic":
+                print("Using cyclic LR with cycle", config["cyclic_period"])
+                scheduler = torch.optim.lr_scheduler.CyclicLR(
+                    optimizer,
+                    base_lr=lr / 10.0,
+                    max_lr=lr,
+                    step_size_up=config["cyclic_period"] // 2,
+                    cycle_momentum=False,
+                )
+            elif config_scheduler == "plateau":
+                print("Using ReduceLROnPlateau")
+                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer,
+                    factor=config["plateau_factor"],
+                    patience=config["plateau_patience"],
+                    verbose=True,
+                )
+            else:
+                raise ValueError(f"Scheduler {config_scheduler} not supported")
 
-        if optimizer_state is not None:
-            try:
-                optimizer.load_state_dict(optimizer_state)
-            except ValueError as exc:
-                print(f"Skipping optimizer state restore due to param-group mismatch: {exc}")
-        if scheduler is not None and scheduler_state is not None:
-            try:
-                scheduler.load_state_dict(scheduler_state)
-            except ValueError as exc:
-                print(f"Skipping scheduler state restore due to mismatch: {exc}")
+            if config["warmup"]:
+                print("Using warmup scheduler")
+                scheduler = GradualWarmupScheduler(
+                    optimizer,
+                    multiplier=1,
+                    total_epoch=config["warmup_epochs"],
+                    after_scheduler=scheduler,
+                )
 
-    train_eval_loop_nomad(
-        train_model=config["train"],
-        model=model,
-        optimizer=optimizer,
-        lr_scheduler=scheduler,
-        noise_scheduler=noise_scheduler,
-        train_loader=train_loader,
-        test_dataloaders=test_dataloaders,
-        transform=transform,
-        goal_mask_prob=config["goal_mask_prob"],
-        epochs=config["epochs"],
-        device=device,
-        project_folder=config["project_folder"],
-        train_stage=config.get("train_stage", "finetune"),
-        print_log_freq=config["print_log_freq"],
-        wandb_log_freq=config["wandb_log_freq"],
-        image_log_freq=config["image_log_freq"],
-        num_images_log=config["num_images_log"],
-        current_epoch=current_epoch,
-        alpha=float(config["alpha"]),
-        use_wandb=config["use_wandb"],
-        eval_fraction=config["eval_fraction"],
-        eval_freq=config["eval_freq"],
-        resume_checkpoint=resume_checkpoint,
-        goal_guidance_min=float(config.get("goal_guidance_min", 0.25)),
-        goal_guidance_max=float(config.get("goal_guidance_max", 1.75)),
-        goal_guidance_power=float(config.get("goal_guidance_power", 1.5)),
-        use_adaptive_guidance=config.get("use_adaptive_guidance", True),
-        guidance_confidence_weight=float(config.get("guidance_confidence_weight", 0.35)),
-        guidance_uncertainty_weight=float(config.get("guidance_uncertainty_weight", 0.25)),
-        guidance_distance_scale=float(config.get("guidance_distance_scale", 10.0)),
-        nav_goal_pos_loss_weight=float(config.get("nav_goal_pos_loss_weight", 0.05)),
-        nav_contrastive_loss_weight=float(config.get("nav_contrastive_loss_weight", 0.01)),
-        nav_contrastive_temperature=float(config.get("nav_contrastive_temperature", 0.1)),
-        aux_negative_distance_threshold=float(
-            config.get("aux_negative_distance_threshold", config["distance"]["max_dist_cat"])
-        ),
-        max_grad_norm=max_grad_norm,
-    )
+        if stage_idx == 0 and "load_run" in config and latest_checkpoint is not None:
+            def _resolve_state_dict(checkpoint_entry):
+                if checkpoint_entry is None:
+                    return None
+                if hasattr(checkpoint_entry, "state_dict"):
+                    return checkpoint_entry.state_dict()
+                return checkpoint_entry
+
+            optimizer_state = None
+            scheduler_state = None
+            if isinstance(latest_checkpoint, dict):
+                optimizer_state = _resolve_state_dict(
+                    latest_checkpoint.get("optimizer_state_dict", latest_checkpoint.get("optimizer"))
+                )
+                scheduler_state = _resolve_state_dict(
+                    latest_checkpoint.get("scheduler_state_dict", latest_checkpoint.get("scheduler"))
+                )
+
+            load_project_folder = os.path.join("logs", config["load_run"])
+            if optimizer_state is None:
+                optimizer_latest_path = os.path.join(load_project_folder, "optimizer_latest.pth")
+                if os.path.exists(optimizer_latest_path):
+                    optimizer_state = torch.load(optimizer_latest_path, map_location="cpu")
+            if scheduler is not None and scheduler_state is None:
+                scheduler_latest_path = os.path.join(load_project_folder, "scheduler_latest.pth")
+                if os.path.exists(scheduler_latest_path):
+                    scheduler_state = torch.load(scheduler_latest_path, map_location="cpu")
+
+            if optimizer_state is not None:
+                try:
+                    optimizer.load_state_dict(optimizer_state)
+                except ValueError as exc:
+                    print(f"Skipping optimizer state restore due to param-group mismatch: {exc}")
+            if scheduler is not None and scheduler_state is not None:
+                try:
+                    scheduler.load_state_dict(scheduler_state)
+                except ValueError as exc:
+                    print(f"Skipping scheduler state restore due to mismatch: {exc}")
+
+        train_eval_loop_nomad(
+            train_model=config["train"],
+            model=model,
+            optimizer=optimizer,
+            lr_scheduler=scheduler,
+            noise_scheduler=noise_scheduler,
+            train_loader=train_loader,
+            test_dataloaders=test_dataloaders,
+            transform=transform,
+            goal_mask_prob=config["goal_mask_prob"],
+            epochs=stage_epochs,
+            device=device,
+            project_folder=config["project_folder"],
+            train_stage=stage_name,
+            print_log_freq=config["print_log_freq"],
+            wandb_log_freq=config["wandb_log_freq"],
+            image_log_freq=config["image_log_freq"],
+            num_images_log=config["num_images_log"],
+            current_epoch=current_epoch,
+            alpha=float(config["alpha"]),
+            use_wandb=config["use_wandb"],
+            eval_fraction=config["eval_fraction"],
+            eval_freq=config["eval_freq"],
+            resume_checkpoint=resume_checkpoint if stage_idx == 0 else None,
+            goal_guidance_min=float(config.get("goal_guidance_min", 0.25)),
+            goal_guidance_max=float(config.get("goal_guidance_max", 1.75)),
+            goal_guidance_power=float(config.get("goal_guidance_power", 1.5)),
+            use_adaptive_guidance=config.get("use_adaptive_guidance", True),
+            guidance_confidence_weight=float(config.get("guidance_confidence_weight", 0.35)),
+            guidance_uncertainty_weight=float(config.get("guidance_uncertainty_weight", 0.25)),
+            guidance_distance_scale=float(config.get("guidance_distance_scale", 10.0)),
+            nav_goal_pos_loss_weight=float(config.get("nav_goal_pos_loss_weight", 0.05)),
+            nav_contrastive_loss_weight=float(config.get("nav_contrastive_loss_weight", 0.01)),
+            nav_contrastive_temperature=float(config.get("nav_contrastive_temperature", 0.1)),
+            aux_negative_distance_threshold=float(
+                config.get("aux_negative_distance_threshold", config["distance"]["max_dist_cat"])
+            ),
+            max_grad_norm=max_grad_norm,
+        )
+        current_epoch += stage_epochs
 
     _training_cleanup()
     print("FINISHED TRAINING")

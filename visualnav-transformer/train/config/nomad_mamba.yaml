@@ -1,19 +1,26 @@
 project_name: nomad                 
 run_name: nomad_mamba               
 
+# ---------------- 多阶段训练配置 ----------------
+multi_stage: true                         # 开启一键多阶段训练
+stage1_epochs: 10                         # representation_warmup 阶段轮数
+stage2_epochs: 50                         # diffusion_tuning 阶段轮数
+stage3_epochs: 20                         # finetune 阶段轮数
+ablation_unfreeze_all: false              # 消融实验开关：若为true，则无视上述阶段，全程解冻所有参数进行训练
+
 # ---------------- 训练设置 ----------------
 use_wandb: True                           # 是否启用 wandb
 train: True
 train_stage: representation_warmup        # representation_warmup / diffusion_tuning / finetune
 freeze_backbone: true                     # 预热和策略训练阶段默认冻结 DINOv3，finetune 可设为 false
-batch_size: 64
-eval_batch_size: 64                       # 评估时使用较小的batch_size以避免OOM
+batch_size: 128
+eval_batch_size: 128                       # 评估时使用较小的batch_size以避免OOM
 epochs: 100
 gpu_ids: [0]
 num_workers: 12
 lr: 5e-5
 use_differential_lr: true                # 对 backbone 与新加模块使用不同学习率
-backbone_lr: 3e-5                        # 预训练视觉 backbone 用更小 LR，减少全参数微调的不稳定
+backbone_lr: 5e-5                        # 预训练视觉 backbone 用更小 LR，减少全参数微调的不稳定
 optimizer: adamw
 clipping: True
 max_norm: 1.
@@ -94,7 +101,7 @@ guidance_distance_scale: 10.0            # 距离预测转目标置信度的指�
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal
-context_size: 9                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
+context_size: 5                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
 alpha: 1e-4                               # 与原 NoMaD 相同：距离损失权重很小
 
 # ---------------- 距离 / 动作 标签范围 ----------------
