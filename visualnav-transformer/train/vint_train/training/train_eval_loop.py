@@ -91,14 +91,16 @@ def train_eval_loop_nomad(
     nav_contrastive_temperature: float = 0.1,
     aux_negative_distance_threshold: float = 20.0,
     max_grad_norm: Optional[float] = None,
+    ema_model: Optional[EMAModel] = None,
 ):
     latest_path = os.path.join(project_folder, "latest.pth")
     training_latest_path = os.path.join(project_folder, "training_latest.pth")
 
-    ema_model = EMAModel(model=model, power=0.75)
-    if isinstance(resume_checkpoint, dict) and "ema_state_dict" in resume_checkpoint:
-        load_ema_model(ema_model, resume_checkpoint["ema_state_dict"])
-        print("Loaded EMA state from training checkpoint")
+    if ema_model is None:
+        ema_model = EMAModel(model=model, power=0.75)
+        if isinstance(resume_checkpoint, dict) and "ema_state_dict" in resume_checkpoint:
+            load_ema_model(ema_model, resume_checkpoint["ema_state_dict"])
+            print("Loaded EMA state from training checkpoint")
 
     for epoch in range(current_epoch, current_epoch + epochs):
         if train_model:
@@ -206,6 +208,7 @@ def train_eval_loop_nomad(
     if use_wandb:
         wandb.log({"epoch": current_epoch + epochs - 1})
     print()
+    return ema_model
 
 
 def load_model(model, model_type, checkpoint: dict) -> None:

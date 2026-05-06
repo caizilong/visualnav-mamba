@@ -378,6 +378,7 @@ def main(config):
             "freeze_backbone": config.get("freeze_backbone", False),
         })
 
+    ema_model = None
     for stage_idx, stage_info in enumerate(stages):
         stage_name = stage_info["name"]
         stage_epochs = stage_info["epochs"]
@@ -487,7 +488,7 @@ def main(config):
                 except ValueError as exc:
                     print(f"Skipping scheduler state restore due to mismatch: {exc}")
 
-        train_eval_loop_nomad(
+        ema_model = train_eval_loop_nomad(
             train_model=config["train"],
             model=model,
             optimizer=optimizer,
@@ -525,6 +526,7 @@ def main(config):
                 config.get("aux_negative_distance_threshold", config["distance"]["max_dist_cat"])
             ),
             max_grad_norm=max_grad_norm,
+            ema_model=ema_model,
         )
         current_epoch += stage_epochs
 
