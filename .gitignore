@@ -1,3 +1,12 @@
 datasets/
 docs/
 .vscode/
+.$系统框图.drawio.bkp
+.gitignore
+系统框图.drawio
+.gitignore
+visualnav-transformer/GAB-Mamba_Methodology.md
+visualnav-transformer/GAB-Mamba_Data_Flow.md
+visualnav-transformer/GAB-Mamba_Paper_Draft_CN.docx
+visualnav-transformer/GAB-Mamba_Paper_Draft_CN.md
+visualnav-transformer/GAB-Mamba_Paper_Draft.docx

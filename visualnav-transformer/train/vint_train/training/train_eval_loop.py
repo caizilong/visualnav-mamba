@@ -219,12 +219,12 @@ def load_model(model, model_type, checkpoint: dict) -> None:
         state_dict = checkpoint["model_state_dict"]
     else:
         state_dict = checkpoint
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(state_dict, strict=True)
 
 
 def load_ema_model(ema_model, state_dict: dict) -> None:
     if not isinstance(state_dict, dict):
-        _unwrap_model(ema_model.averaged_model).load_state_dict(state_dict, strict=False)
+        _unwrap_model(ema_model.averaged_model).load_state_dict(state_dict, strict=True)
         if hasattr(ema_model, "shadow_params"):
             ema_model.shadow_params = [
                 param.detach().clone()
@@ -233,7 +233,7 @@ def load_ema_model(ema_model, state_dict: dict) -> None:
         return
 
     averaged_model_state = state_dict.get("averaged_model", state_dict)
-    _unwrap_model(ema_model.averaged_model).load_state_dict(averaged_model_state, strict=False)
+    _unwrap_model(ema_model.averaged_model).load_state_dict(averaged_model_state, strict=True)
 
     device = _ema_device(ema_model)
     if hasattr(ema_model, "shadow_params"):

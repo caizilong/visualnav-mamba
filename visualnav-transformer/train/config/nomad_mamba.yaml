@@ -50,8 +50,9 @@ goal_encoder: vit_small_patch16_dinov3    # 目标编码器类型；share_visual
 share_visual_backbone: true               # obs / goal 共用同一套 DINOv3 参数
 adapter_hidden_dim: 96                    # 轻量 adapter 的瓶颈维度（约为 hidden size 的 1/4）
 adapter_scale: 0.1                        # 小尺度残差注入
-use_spatial_mamba_tokens: false           # 消融开关：false=每帧全局池化1个token；true=保留空间tokens并展平成长序列送入Mamba
+use_spatial_mamba_tokens: false           # 消融开关：false=每帧全局池化1个token；true=保留空间tokens并展平成长序列送入Mamba（DINOv3优化实验推荐true）
 drop_backbone_prefix_tokens: true         # 空间token模式下丢弃ViT的CLS/register等prefix tokens，只保留patch tokens
+vit_global_pool: all_mean                 # 非空间token模式下的ViT池化：all_mean/cls/patch_mean/cls_patch_mean（DINOv3优化实验推荐patch_mean）
 bidirectional_mamba: true               # 前向/反向 Mamba 同时建模，让 goal 信息反向传播到上下文
 use_goal_gate: true                     # 是否启用当前帧与 goal 的门控融合
 use_goal_film: true                     # 是否启用 goal-aware FiLM 调制历史 observation tokens

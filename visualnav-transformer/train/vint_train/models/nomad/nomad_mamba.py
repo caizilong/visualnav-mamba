@@ -9,6 +9,9 @@ import timm
 from .mamba2 import Mamba2, MambaConfig
 
 
+VALID_VIT_GLOBAL_POOLS = {"all_mean", "cls", "patch_mean", "cls_patch_mean"}
+
+
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_seq_len=6):
         super().__init__()
@@ -195,25 +198,195 @@ def _create_timm_encoder(
     return encoder, num_features
 
 
+def _get_vit_prefix_token_count(encoder: nn.Module, num_tokens: int) -> int:
+    num_prefix_tokens = int(getattr(encoder, "num_prefix_tokens", 0) or 0)
+    if num_prefix_tokens > 0:
+        return min(num_prefix_tokens, num_tokens)
+
+    cls_token = getattr(encoder, "cls_token", None)
+    has_cls_token = cls_token is not None
+    num_prefix_tokens = 1 if has_cls_token else 0
+
+    num_extra_tokens = 0
+    for attr_name in (
+        "num_reg_tokens",
+        "num_register_tokens",
+        "n_register_tokens",
+        "num_storage_tokens",
+        "n_storage_tokens",
+    ):
+        attr_value = getattr(encoder, attr_name, None)
+        if attr_value is not None:
+            num_extra_tokens = int(attr_value)
+            break
+
+    if num_extra_tokens == 0:
+        for attr_name in ("reg_token", "register_tokens", "storage_tokens"):
+            token = getattr(encoder, attr_name, None)
+            if token is not None and hasattr(token, "ndim") and token.ndim >= 2:
+                num_extra_tokens = int(token.shape[-2])
+                break
+
+    return min(num_prefix_tokens + num_extra_tokens, num_tokens)
+
+
+def _dict_tensor(feats: dict, *keys: str) -> Optional[torch.Tensor]:
+    for key in keys:
+        value = feats.get(key)
+        if torch.is_tensor(value):
+            return value
+    return None
+
+
+def _as_token_sequence(token: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    if token is None:
+        return None
+    if token.ndim == 2:
+        return token.unsqueeze(1)
+    return token
+
+
+def _concat_token_sequences(*tokens: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    token_list = [
+        _as_token_sequence(token)
+        for token in tokens
+        if token is not None
+    ]
+    if not token_list:
+        return None
+    return torch.cat(token_list, dim=1)
+
+
+def _get_patch_tokens(tokens: torch.Tensor, num_prefix_tokens: int) -> torch.Tensor:
+    if num_prefix_tokens < tokens.shape[1]:
+        return tokens[:, num_prefix_tokens:, :]
+    raise ValueError(
+        "Cannot compute patch tokens because the inferred prefix token count "
+        f"({num_prefix_tokens}) covers all {tokens.shape[1]} tokens."
+    )
+
+
+def _pool_vit_tokens(
+    tokens: torch.Tensor,
+    num_prefix_tokens: int,
+    vit_global_pool: str,
+) -> torch.Tensor:
+    if vit_global_pool not in VALID_VIT_GLOBAL_POOLS:
+        raise ValueError(
+            f"Unsupported vit_global_pool={vit_global_pool!r}. "
+            f"Expected one of {sorted(VALID_VIT_GLOBAL_POOLS)}."
+        )
+
+    if vit_global_pool == "all_mean":
+        return tokens.mean(dim=1)
+    if vit_global_pool in {"cls", "cls_patch_mean"} and num_prefix_tokens < 1:
+        raise ValueError(
+            f"vit_global_pool={vit_global_pool!r} requires a CLS/prefix token, "
+            "but none was inferred from the encoder output."
+        )
+    if vit_global_pool == "cls":
+        return tokens[:, 0, :]
+
+    patch_tokens = _get_patch_tokens(tokens, num_prefix_tokens)
+    patch_mean = patch_tokens.mean(dim=1)
+    if vit_global_pool == "patch_mean":
+        return patch_mean
+    return 0.5 * (tokens[:, 0, :] + patch_mean)
+
+
+def _pool_dinov3_dict_features(
+    encoder: nn.Module,
+    feats: dict,
+    keep_spatial_tokens: bool,
+    drop_prefix_tokens: bool,
+    vit_global_pool: str,
+) -> torch.Tensor:
+    cls_token = _dict_tensor(feats, "x_norm_clstoken", "cls_token")
+    storage_tokens = _dict_tensor(
+        feats,
+        "x_storage_tokens",
+        "x_norm_registertokens",
+        "x_norm_regtokens",
+        "storage_tokens",
+        "register_tokens",
+    )
+    patch_tokens = _dict_tensor(
+        feats,
+        "x_norm_patchtokens",
+        "x_patchtokens",
+        "patch_tokens",
+    )
+    all_tokens = _dict_tensor(feats, "x_norm", "last_hidden_state")
+    if all_tokens is None:
+        all_tokens = _concat_token_sequences(cls_token, storage_tokens, patch_tokens)
+    inferred_prefix_tokens = (
+        _get_vit_prefix_token_count(encoder, all_tokens.shape[1])
+        if all_tokens is not None and all_tokens.ndim == 3
+        else 0
+    )
+    if patch_tokens is None and all_tokens is not None and inferred_prefix_tokens > 0:
+        patch_tokens = _get_patch_tokens(all_tokens, inferred_prefix_tokens)
+
+    if keep_spatial_tokens:
+        if drop_prefix_tokens:
+            if patch_tokens is None:
+                if all_tokens is None:
+                    raise ValueError("DINOv3 dict output does not contain patch tokens.")
+                return all_tokens
+            return patch_tokens
+        if all_tokens is None:
+            raise ValueError("DINOv3 dict output does not contain a token sequence.")
+        return all_tokens
+
+    if all_tokens is None:
+        raise ValueError("DINOv3 dict output does not contain any global or patch tokens.")
+
+    num_prefix_tokens = 0
+    if cls_token is not None:
+        num_prefix_tokens += 1
+    if storage_tokens is not None:
+        storage_tokens = _as_token_sequence(storage_tokens)
+        num_prefix_tokens += storage_tokens.shape[1]
+    if num_prefix_tokens == 0:
+        num_prefix_tokens = inferred_prefix_tokens
+    return _pool_vit_tokens(all_tokens, num_prefix_tokens, vit_global_pool)
+
+
 def _extract_features(
     encoder: nn.Module,
     x: torch.Tensor,
     keep_spatial_tokens: bool = False,
     drop_prefix_tokens: bool = True,
+    vit_global_pool: str = "all_mean",
 ) -> torch.Tensor:
     """
     从 timm 编码器中提取特征，统一处理不同模型的输出格式。
     
     不同模型的 forward_features 输出：
     - CNN (EfficientNet, ResNet, ConvNeXt): [B, C, H, W]
-    - ViT (包括 DINOv2): [B, num_tokens, dim] 或 [B, dim]
+    - ViT/DINO: [B, num_tokens, dim]、[B, dim] 或 DINOv3 dict
     
     Returns:
         features:
             - keep_spatial_tokens=False: [B, num_features]
             - keep_spatial_tokens=True: [B, num_tokens, num_features]
     """
+    if vit_global_pool not in VALID_VIT_GLOBAL_POOLS:
+        raise ValueError(
+            f"Unsupported vit_global_pool={vit_global_pool!r}. "
+            f"Expected one of {sorted(VALID_VIT_GLOBAL_POOLS)}."
+        )
+
     feats = encoder.forward_features(x)
+
+    if isinstance(feats, dict):
+        return _pool_dinov3_dict_features(
+            encoder,
+            feats,
+            keep_spatial_tokens=keep_spatial_tokens,
+            drop_prefix_tokens=drop_prefix_tokens,
+            vit_global_pool=vit_global_pool,
+        )
     
     if feats.ndim == 4:
         if keep_spatial_tokens:
@@ -224,17 +397,12 @@ def _extract_features(
             feats = F.adaptive_avg_pool2d(feats, (1, 1)).flatten(start_dim=1)
     elif feats.ndim == 3:
         # ViT 输出: [B, num_tokens, dim]
+        num_prefix_tokens = _get_vit_prefix_token_count(encoder, feats.shape[1])
         if keep_spatial_tokens:
-            if drop_prefix_tokens:
-                num_prefix_tokens = int(getattr(encoder, "num_prefix_tokens", 0))
-                if num_prefix_tokens == 0 and hasattr(encoder, "cls_token"):
-                    num_prefix_tokens = 1
-                if 0 < num_prefix_tokens < feats.shape[1]:
-                    feats = feats[:, num_prefix_tokens:, :]
+            if drop_prefix_tokens and num_prefix_tokens > 0:
+                feats = _get_patch_tokens(feats, num_prefix_tokens)
         else:
-            # 通常第一个 token 是 CLS token，或者做平均池化
-            # 这里使用平均池化以保持通用性
-            feats = feats.mean(dim=1)  # [B, dim]
+            feats = _pool_vit_tokens(feats, num_prefix_tokens, vit_global_pool)
     elif feats.ndim == 2 and keep_spatial_tokens:
         feats = feats.unsqueeze(1)
     # 如果 feats.ndim == 2，已经是 [B, dim] 格式，无需处理
@@ -285,8 +453,14 @@ class NoMaD_Mamba(nn.Module):
         nav_aux_hidden_dim: Optional[int] = None,
         use_spatial_mamba_tokens: bool = False,
         drop_backbone_prefix_tokens: bool = True,
+        vit_global_pool: str = "all_mean",
     ) -> None:
         super().__init__()
+        if vit_global_pool not in VALID_VIT_GLOBAL_POOLS:
+            raise ValueError(
+                f"Unsupported vit_global_pool={vit_global_pool!r}. "
+                f"Expected one of {sorted(VALID_VIT_GLOBAL_POOLS)}."
+            )
 
         self.obs_encoding_size = obs_encoding_size
         self.goal_encoding_size = obs_encoding_size
@@ -310,6 +484,7 @@ class NoMaD_Mamba(nn.Module):
         self.use_navigation_aux = use_navigation_aux
         self.use_spatial_mamba_tokens = use_spatial_mamba_tokens
         self.drop_backbone_prefix_tokens = drop_backbone_prefix_tokens
+        self.vit_global_pool = vit_global_pool
         self._last_aux_outputs = None
 
         # 如果未指定 goal_encoder，则使用与 obs_encoder 相同的类型
@@ -506,6 +681,7 @@ class NoMaD_Mamba(nn.Module):
                 goal_img,
                 keep_spatial_tokens=self.use_spatial_mamba_tokens,
                 drop_prefix_tokens=self.drop_backbone_prefix_tokens,
+                vit_global_pool=self.vit_global_pool,
             )
         goal_encoding = self.compress_goal_enc(goal_encoding)
         goal_encoding = self.goal_adapter(goal_encoding)
@@ -644,6 +820,7 @@ class NoMaD_Mamba(nn.Module):
                 joint_inputs,
                 keep_spatial_tokens=self.use_spatial_mamba_tokens,
                 drop_prefix_tokens=self.drop_backbone_prefix_tokens,
+                vit_global_pool=self.vit_global_pool,
             )
             obs_encoding = joint_encoding[: obs_stack.shape[0]]
             goal_backbone_encoding = joint_encoding[obs_stack.shape[0] :]
@@ -653,6 +830,7 @@ class NoMaD_Mamba(nn.Module):
                 obs_stack,
                 keep_spatial_tokens=self.use_spatial_mamba_tokens,
                 drop_prefix_tokens=self.drop_backbone_prefix_tokens,
+                vit_global_pool=self.vit_global_pool,
             )
         obs_encoding = self.compress_obs_enc(obs_encoding)
         obs_encoding = self.obs_adapter(obs_encoding)

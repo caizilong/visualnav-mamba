@@ -296,6 +296,7 @@ def main(config):
         nav_aux_hidden_dim=config.get("nav_aux_hidden_dim", None),
         use_spatial_mamba_tokens=config.get("use_spatial_mamba_tokens", False),
         drop_backbone_prefix_tokens=config.get("drop_backbone_prefix_tokens", True),
+        vit_global_pool=config.get("vit_global_pool", "all_mean"),
     )
 
     noise_pred_net = ConditionalUnet1D(

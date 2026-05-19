@@ -120,7 +120,11 @@ def main(args: argparse.Namespace):
     while not rospy.is_shutdown():
         if len(context_queue) > model_params["context_size"]:
             obs_images = transform_images(context_queue, model_params["image_size"], center_crop=False).to(device)
-            fake_goal = torch.randn((1, 3, *model_params["image_size"])).to(device)
+            fake_goal = torch.randn(
+                (1, 3, *obs_images.shape[-2:]),
+                dtype=obs_images.dtype,
+                device=device,
+            )
             mask = torch.ones(1).long().to(device)
 
             with torch.no_grad():
