@@ -3,9 +3,9 @@ run_name: nomad_mamba
 
 # ---------------- 多阶段训练配置 ----------------
 multi_stage: true                         # 开启一键多阶段训练
-stage1_epochs: 10                         # representation_warmup 阶段轮数
-stage2_epochs: 50                         # diffusion_tuning 阶段轮数
-stage3_epochs: 20                         # finetune 阶段轮数
+stage1_epochs: 1                         # representation_warmup 阶段轮数
+stage2_epochs: 1                         # diffusion_tuning 阶段轮数
+stage3_epochs: 0                         # finetune 阶段轮数
 ablation_unfreeze_all: false              # 消融实验开关：若为true，则无视上述阶段，全程解冻所有参数进行训练
 
 # ---------------- 训练设置 ----------------
@@ -13,11 +13,11 @@ use_wandb: True                           # 是否启用 wandb
 train: True
 train_stage: representation_warmup        # representation_warmup / diffusion_tuning / finetune
 freeze_backbone: true                     # 预热和策略训练阶段默认冻结 DINOv3，finetune 可设为 false
-batch_size: 128
-eval_batch_size: 128                       # 评估时使用较小的batch_size以避免OOM
+batch_size: 512
+eval_batch_size: 512                       # 评估时使用较小的batch_size以避免OOM
 epochs: 100
 gpu_ids: [0]
-num_workers: 12
+num_workers: 16
 lr: 5e-5
 use_differential_lr: true                # 对 backbone 与新加模块使用不同学习率
 backbone_lr: 5e-5                        # 预训练视觉 backbone 用更小 LR，减少全参数微调的不稳定
@@ -102,7 +102,7 @@ guidance_distance_scale: 10.0            # 距离预测转目标置信度的指�
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal
-context_size: 5                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
+context_size: 12                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
 alpha: 1e-4                               # 与原 NoMaD 相同：距离损失权重很小
 
 # ---------------- 距离 / 动作 标签范围 ----------------
@@ -128,7 +128,7 @@ datasets:
   #   goals_per_obs: 1 # 对每一个观测帧（observation），从其未来轨迹中随机采样多少个目标（goal）图像
   #   negative_mining: True # 是否启用 ViNG 论文（Shah et al.）提出的负采样策略  
   go_stanford:
-    data_folder: /workspace/datasets/go_stanford
+    data_folder: /root/visualnav-mamba/datasets/go_stanford
     train: vint_train/data/data_splits/go_stanford/train/
     test: vint_train/data/data_splits/go_stanford/test/
     end_slack: 0 # 允许预测轨迹终点与真实终点之间的最大容忍距离（单位：轨迹点索引）
