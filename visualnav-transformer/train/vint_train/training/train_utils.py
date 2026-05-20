@@ -14,7 +14,7 @@ import wandb
 import yaml
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -33,7 +33,7 @@ for key in data_config["action_stats"]:
 
 
 def _amp_context(enabled: bool):
-    return autocast(enabled=True) if enabled else nullcontext()
+    return autocast("cuda", enabled=True) if enabled else nullcontext()
 
 
 def _action_stat_tensor(stats, key: str, ref: torch.Tensor) -> torch.Tensor:
@@ -282,7 +282,7 @@ def train_nomad(
     non_blocking = device.type == "cuda"
     log_window_size = max(int(print_log_freq), 1)
     amp_enabled = bool(use_amp and device.type == "cuda")
-    scaler = GradScaler(enabled=amp_enabled)
+    scaler = GradScaler("cuda", enabled=amp_enabled)
 
     ema_eval_model = ema_model.averaged_model
 
