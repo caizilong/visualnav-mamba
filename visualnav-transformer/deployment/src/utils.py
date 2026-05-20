@@ -67,6 +67,7 @@ def load_model(
         goal_fusion_hidden_dim=config.get("goal_fusion_hidden_dim", None),
         goal_mamba_fusion_hidden_dim=config.get("goal_mamba_fusion_hidden_dim", None),
         share_visual_backbone=config.get("share_visual_backbone", False),
+        use_visual_adapter=config.get("use_visual_adapter", True),
         adapter_hidden_dim=config.get("adapter_hidden_dim", None),
         adapter_scale=config.get("adapter_scale", 0.1),
         use_navigation_aux=config.get("use_navigation_aux", True),

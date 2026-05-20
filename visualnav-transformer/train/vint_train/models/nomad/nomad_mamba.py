@@ -447,6 +447,7 @@ class NoMaD_Mamba(nn.Module):
         goal_fusion_hidden_dim: Optional[int] = None,
         goal_mamba_fusion_hidden_dim: Optional[int] = None,
         share_visual_backbone: bool = False,
+        use_visual_adapter: bool = True,
         adapter_hidden_dim: Optional[int] = None,
         adapter_scale: float = 0.1,
         use_navigation_aux: bool = True,
@@ -481,6 +482,7 @@ class NoMaD_Mamba(nn.Module):
             else self.obs_encoding_size
         )
         self.share_visual_backbone = share_visual_backbone
+        self.use_visual_adapter = use_visual_adapter
         self.use_navigation_aux = use_navigation_aux
         self.use_spatial_mamba_tokens = use_spatial_mamba_tokens
         self.drop_backbone_prefix_tokens = drop_backbone_prefix_tokens
@@ -530,21 +532,25 @@ class NoMaD_Mamba(nn.Module):
         else:
             self.compress_goal_enc = nn.Identity()
 
-        adapter_hidden_dim = (
-            adapter_hidden_dim
-            if adapter_hidden_dim is not None
-            else max(32, self.obs_encoding_size // 4)
-        )
-        self.obs_adapter = ResidualAdapter(
-            dim=self.obs_encoding_size,
-            hidden_dim=adapter_hidden_dim,
-            scale=adapter_scale,
-        )
-        self.goal_adapter = ResidualAdapter(
-            dim=self.goal_encoding_size,
-            hidden_dim=adapter_hidden_dim,
-            scale=adapter_scale,
-        )
+        if self.use_visual_adapter:
+            adapter_hidden_dim = (
+                adapter_hidden_dim
+                if adapter_hidden_dim is not None
+                else max(32, self.obs_encoding_size // 4)
+            )
+            self.obs_adapter = ResidualAdapter(
+                dim=self.obs_encoding_size,
+                hidden_dim=adapter_hidden_dim,
+                scale=adapter_scale,
+            )
+            self.goal_adapter = ResidualAdapter(
+                dim=self.goal_encoding_size,
+                hidden_dim=adapter_hidden_dim,
+                scale=adapter_scale,
+            )
+        else:
+            self.obs_adapter = nn.Identity()
+            self.goal_adapter = nn.Identity()
 
         # 当前观察帧与目标帧分离编码后，再通过轻量门控融合形成目标 token。
         pair_dim = 4 * self.obs_encoding_size

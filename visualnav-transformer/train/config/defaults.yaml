@@ -37,6 +37,7 @@ obs_encoder: efficientnet-b0
 goal_encoder: efficientnet-b0
 pretrained_backbone: true
 share_visual_backbone: false
+use_visual_adapter: true
 adapter_hidden_dim: 96
 adapter_scale: 0.1
 use_spatial_mamba_tokens: false

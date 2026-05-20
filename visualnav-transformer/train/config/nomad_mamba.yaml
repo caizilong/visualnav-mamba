@@ -53,6 +53,7 @@ encoding_size: 384                        # 对齐 ViT-S / DINOv3 的隐藏维�
 obs_encoder: vit_small_patch16_dinov3     # 观测编码器（ViT-S / DINOv3）
 goal_encoder: vit_small_patch16_dinov3    # 目标编码器类型；share_visual_backbone=true 时会实际共享主干
 share_visual_backbone: true               # obs / goal 共用同一套 DINOv3 参数
+use_visual_adapter: true                  # 是否启用 backbone 后的 obs/goal 轻量残差 adapter；消融实验可设为 false
 adapter_hidden_dim: 96                    # 轻量 adapter 的瓶颈维度（约为 hidden size 的 1/4）
 adapter_scale: 0.1                        # 小尺度残差注入
 use_spatial_mamba_tokens: false           # 消融开关：false=每帧全局池化1个token；true=保留空间tokens并展平成长序列送入Mamba（DINOv3优化实验推荐true）
