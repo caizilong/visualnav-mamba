@@ -105,6 +105,7 @@ def _set_requires_grad(module: nn.Module, enabled: bool) -> None:
 
 
 def _apply_train_stage(config: dict, model: NoMaD) -> None:
+    vision_encoder = model.vision_encoder
     if config.get("ablation_unfreeze_all", False):
         _set_requires_grad(model, True)
         train_stage = "ablation_unfreeze_all (finetune)"
@@ -116,7 +117,6 @@ def _apply_train_stage(config: dict, model: NoMaD) -> None:
             raise ValueError(f"train_stage must be one of {sorted(valid_stages)}, got {train_stage}")
 
         freeze_backbone = bool(config.get("freeze_backbone", False))
-        vision_encoder = model.vision_encoder
 
         if freeze_backbone or train_stage in {"representation_warmup", "diffusion_tuning"}:
             for encoder_name in ("obs_encoder", "goal_encoder"):
@@ -327,7 +327,7 @@ def main(config):
     latest_checkpoint = None
     resume_checkpoint = None
     if "load_run" in config:
-        load_project_folder = os.path.join("logs", config["load_run"])
+        load_project_folder = os.path.join("/root/autodl-tmp/logs", config["load_run"])
         print("Loading model from", load_project_folder)
 
         latest_path = os.path.join(load_project_folder, "latest.pth")
@@ -468,7 +468,7 @@ def main(config):
                     latest_checkpoint.get("scheduler_state_dict", latest_checkpoint.get("scheduler"))
                 )
 
-            load_project_folder = os.path.join("logs", config["load_run"])
+            load_project_folder = os.path.join("/root/autodl-tmp/logs", config["load_run"])
             if optimizer_state is None:
                 optimizer_latest_path = os.path.join(load_project_folder, "optimizer_latest.pth")
                 if os.path.exists(optimizer_latest_path):
@@ -560,8 +560,12 @@ if __name__ == "__main__":
     config.update(user_config)
 
     config["run_name"] += "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
-    config["project_folder"] = os.path.join("logs", config["project_name"], config["run_name"])
-    os.makedirs(config["project_folder"])
+    config["project_folder"] = os.path.join(
+        "/root/autodl-tmp/logs",
+        config["project_name"],
+        config["run_name"],
+    )
+    os.makedirs(config["project_folder"], exist_ok=True)
 
     if config["use_wandb"]:
         wandb.login()
