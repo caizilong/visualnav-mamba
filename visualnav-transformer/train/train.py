@@ -251,16 +251,20 @@ def main(config):
 
     if "eval_batch_size" not in config:
         config["eval_batch_size"] = config["batch_size"]
+    if config.get("eval_num_workers") is None:
+        config["eval_num_workers"] = min(4, int(config["num_workers"]))
 
     test_dataloaders = {}
     for dataset_type, dataset in test_datasets.items():
+        eval_num_workers = int(config["eval_num_workers"])
         test_dataloaders[dataset_type] = DataLoader(
             dataset,
             batch_size=config["eval_batch_size"],
             shuffle=False,
-            num_workers=0,
+            num_workers=eval_num_workers,
             drop_last=False,
             pin_memory=torch.cuda.is_available(),
+            persistent_workers=eval_num_workers > 0,
         )
 
     def _training_cleanup():
@@ -533,9 +537,11 @@ def main(config):
             wandb_log_freq=config["wandb_log_freq"],
             image_log_freq=config["image_log_freq"],
             num_images_log=config["num_images_log"],
+            sampling_metrics_freq=int(config.get("sampling_metrics_freq", config["print_log_freq"])),
             current_epoch=current_epoch,
             alpha=float(config["alpha"]),
             use_wandb=config["use_wandb"],
+            use_amp=bool(config.get("use_amp", torch.cuda.is_available())),
             eval_fraction=config["eval_fraction"],
             eval_freq=config["eval_freq"],
             resume_checkpoint=resume_checkpoint if stage_idx == 0 else None,

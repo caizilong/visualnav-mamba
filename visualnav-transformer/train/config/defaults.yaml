@@ -12,6 +12,8 @@ eval_batch_size: 64
 epochs: 100
 gpu_ids: [0]
 num_workers: 4
+eval_num_workers: null
+use_amp: true
 lr: 5e-5
 optimizer: adamw
 seed: 0
@@ -112,6 +114,7 @@ datasets: {}
 print_log_freq: 200
 image_log_freq: 0
 num_images_log: 8
-eval_fraction: 0.25
+sampling_metrics_freq: 1000
+eval_fraction: 0.1
 wandb_log_freq: 200
-eval_freq: 1
+eval_freq: 5

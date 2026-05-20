@@ -1,5 +1,6 @@
 import itertools
 import os
+from contextlib import nullcontext
 from typing import Optional
 
 import matplotlib.pyplot as plt
@@ -13,6 +14,7 @@ import wandb
 import yaml
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel
+from torch.cuda.amp import GradScaler, autocast
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -20,7 +22,7 @@ from torchvision import transforms
 from vint_train.data.data_utils import VISUALIZATION_IMAGE_SIZE
 from vint_train.training.logger import Logger
 from vint_train.visualizing.action_utils import plot_trajs_and_points
-from vint_train.visualizing.visualize_utils import from_numpy, to_numpy
+from vint_train.visualizing.visualize_utils import to_numpy
 
 with open(os.path.join(os.path.dirname(__file__), "../data/data_config.yaml"), "r") as f:
     data_config = yaml.safe_load(f)
@@ -28,6 +30,41 @@ with open(os.path.join(os.path.dirname(__file__), "../data/data_config.yaml"), "
 ACTION_STATS = {}
 for key in data_config["action_stats"]:
     ACTION_STATS[key] = np.array(data_config["action_stats"][key])
+
+
+def _amp_context(enabled: bool):
+    return autocast(enabled=True) if enabled else nullcontext()
+
+
+def _action_stat_tensor(stats, key: str, ref: torch.Tensor) -> torch.Tensor:
+    return torch.as_tensor(stats[key], dtype=torch.float32, device=ref.device)
+
+
+def normalize_data_torch(data: torch.Tensor, stats=ACTION_STATS) -> torch.Tensor:
+    data = data.float()
+    stat_min = _action_stat_tensor(stats, "min", data)
+    stat_max = _action_stat_tensor(stats, "max", data)
+    ndata = (data - stat_min) / (stat_max - stat_min)
+    return ndata * 2 - 1
+
+
+def unnormalize_data_torch(ndata: torch.Tensor, stats=ACTION_STATS) -> torch.Tensor:
+    ndata = ndata.float()
+    stat_min = _action_stat_tensor(stats, "min", ndata)
+    stat_max = _action_stat_tensor(stats, "max", ndata)
+    data = (ndata + 1) / 2
+    return data * (stat_max - stat_min) + stat_min
+
+
+def get_delta_torch(actions: torch.Tensor) -> torch.Tensor:
+    zeros = torch.zeros(
+        (actions.shape[0], 1, actions.shape[-1]),
+        dtype=actions.dtype,
+        device=actions.device,
+    )
+    ex_actions = torch.cat((zeros, actions), dim=1)
+    return ex_actions[:, 1:] - ex_actions[:, :-1]
+
 
 # Train utils for NOMAD
 
@@ -196,7 +233,9 @@ def train_nomad(
     wandb_log_freq: int = 10,
     image_log_freq: int = 1000,
     num_images_log: int = 8,
+    sampling_metrics_freq: int = 1000,
     use_wandb: bool = True,
+    use_amp: bool = True,
     goal_guidance_min: float = 0.25,
     goal_guidance_max: float = 1.75,
     goal_guidance_power: float = 1.5,
@@ -237,11 +276,13 @@ def train_nomad(
         use_wandb: 是否记录到 wandb
         goal_guidance_*: 与配置 goal_guidance_* 一致，用于日志/可视化中的扩散采样
     """
-    goal_mask_prob = torch.clip(torch.tensor(goal_mask_prob), 0, 1)
+    goal_mask_prob = float(torch.clip(torch.tensor(goal_mask_prob), 0, 1).item())
     model.train()
     num_batches = len(dataloader)
     non_blocking = device.type == "cuda"
     log_window_size = max(int(print_log_freq), 1)
+    amp_enabled = bool(use_amp and device.type == "cuda")
+    scaler = GradScaler(enabled=amp_enabled)
 
     ema_eval_model = ema_model.averaged_model
 
@@ -283,93 +324,101 @@ def train_nomad(
             
             # -------- 1) 图像预处理与可视化图像抽取 --------
             obs_images = torch.split(obs_image, 3, dim=1)
-            batch_viz_obs_images = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE[::-1])
-            batch_viz_goal_images = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE[::-1])
+            should_log_images = image_log_freq != 0 and i % image_log_freq == 0
+            if should_log_images:
+                batch_viz_obs_images = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE[::-1])
+                batch_viz_goal_images = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE[::-1])
+            else:
+                batch_viz_obs_images = None
+                batch_viz_goal_images = None
             batch_obs_images = [transform(obs) for obs in obs_images]
             batch_obs_images = torch.cat(batch_obs_images, dim=1).to(device, non_blocking=non_blocking)
             batch_goal_images = transform(goal_image).to(device, non_blocking=non_blocking)
+            actions = actions.to(device, non_blocking=non_blocking)
             action_mask = action_mask.to(device, non_blocking=non_blocking)
             goal_pos = goal_pos.float().to(device, non_blocking=non_blocking)
+            distance = distance.float().to(device, non_blocking=non_blocking)
 
             B = actions.shape[0]
 
             # Generate random goal mask
-            goal_mask = (torch.rand((B,)) < goal_mask_prob).long().to(device, non_blocking=non_blocking)
-            obsgoal_cond = model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=goal_mask)
-            aux_outputs = model("vision_aux")
-            
-            # Get distance label
-            distance = distance.float().to(device, non_blocking=non_blocking)
-            # 将绝对动作序列转成相邻 step 之间的增量，再根据数据集统计量归一化到 [-1, 1]
-            deltas = get_delta(actions)
-            ndeltas = normalize_data(deltas, ACTION_STATS)
-            naction = from_numpy(ndeltas).to(device, non_blocking=non_blocking)
-            assert naction.shape[-1] == 2, "action dim must be 2"
-
-            # -------- 2) 距离预测损失 --------
-            dist_pred = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
-            # 逐样本计算距离损失，再屏蔽掉训练时被 goal-mask 的样本。
-            dist_loss_per_sample = nn.functional.mse_loss(
-                dist_pred.squeeze(-1),
-                distance,
-                reduction="none",
-            )
-            valid_dist_mask = 1 - goal_mask.float()
-            dist_loss = (dist_loss_per_sample * valid_dist_mask).sum() / (
-                valid_dist_mask.sum() + 1e-2
-            )
-            nav_aux_loss, nav_aux_logs = _compute_navigation_aux_loss(
-                aux_outputs,
-                goal_pos,
-                distance,
-                goal_mask,
-                aux_negative_distance_threshold,
-                nav_goal_pos_loss_weight,
-                nav_contrastive_loss_weight,
-                nav_contrastive_temperature,
-            )
-
-            def action_reduce(unreduced_loss: torch.Tensor):
-                # Reduce over non-batch dimensions to get loss per batch element
-                while unreduced_loss.dim() > 1:
-                    unreduced_loss = unreduced_loss.mean(dim=-1)
-                assert unreduced_loss.shape == action_mask.shape, f"{unreduced_loss.shape} != {action_mask.shape}"
-                return (unreduced_loss * action_mask).mean() / (action_mask.mean() + 1e-2)
-
-            if train_stage == "representation_warmup":
-                diffusion_loss = naction.new_tensor(0.0)
-            else:
-                # Sample noise to add to actions：为每条轨迹采样高斯噪声
-                noise = torch.randn(naction.shape, device=device)
-
-                # Sample a diffusion iteration for each data point：每个样本随机选择一个时间步
-                timesteps = torch.randint(
-                    0, noise_scheduler.config.num_train_timesteps,
-                    (B,), device=device
-                ).long()
-
-                # Add noise：根据对应时间步的噪声水平，把轨迹从“干净”推到“噪声域”
-                noisy_action = noise_scheduler.add_noise(
-                    naction, noise, timesteps)
+            goal_mask = torch.rand((B,), device=device) < goal_mask_prob
+            goal_mask = goal_mask.long()
+            with _amp_context(amp_enabled):
+                obsgoal_cond = model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=goal_mask)
+                aux_outputs = model("vision_aux")
                 
-                # 预测噪声残差，使得在该时间步可以从 noisy_action 恢复出原始 clean action
-                noise_pred = model("noise_pred_net", sample=noisy_action, timestep=timesteps, global_cond=obsgoal_cond)
+                # 将绝对动作序列转成相邻 step 之间的增量，再根据数据集统计量归一化到 [-1, 1]
+                deltas = get_delta_torch(actions)
+                naction = normalize_data_torch(deltas, ACTION_STATS)
+                assert naction.shape[-1] == 2, "action dim must be 2"
 
-                # L2 loss：在时间和维度上求平均，再用 action_mask 做样本级加权
-                diffusion_loss = action_reduce(F.mse_loss(noise_pred, noise, reduction="none"))
-            
-            # Total loss：距离与扩散损失的加权和
-            if train_stage == "representation_warmup":
-                loss = dist_loss + nav_aux_loss
-            else:
-                loss = alpha * dist_loss + (1-alpha) * diffusion_loss + nav_aux_loss
+                # -------- 2) 距离预测损失 --------
+                dist_pred = model("dist_pred_net", obsgoal_cond=obsgoal_cond)
+                # 逐样本计算距离损失，再屏蔽掉训练时被 goal-mask 的样本。
+                dist_loss_per_sample = nn.functional.mse_loss(
+                    dist_pred.squeeze(-1),
+                    distance,
+                    reduction="none",
+                )
+                valid_dist_mask = 1 - goal_mask.float()
+                dist_loss = (dist_loss_per_sample * valid_dist_mask).sum() / (
+                    valid_dist_mask.sum() + 1e-2
+                )
+                nav_aux_loss, nav_aux_logs = _compute_navigation_aux_loss(
+                    aux_outputs,
+                    goal_pos,
+                    distance,
+                    goal_mask,
+                    aux_negative_distance_threshold,
+                    nav_goal_pos_loss_weight,
+                    nav_contrastive_loss_weight,
+                    nav_contrastive_temperature,
+                )
+
+                def action_reduce(unreduced_loss: torch.Tensor):
+                    # Reduce over non-batch dimensions to get loss per batch element
+                    while unreduced_loss.dim() > 1:
+                        unreduced_loss = unreduced_loss.mean(dim=-1)
+                    assert unreduced_loss.shape == action_mask.shape, f"{unreduced_loss.shape} != {action_mask.shape}"
+                    return (unreduced_loss * action_mask).mean() / (action_mask.mean() + 1e-2)
+
+                if train_stage == "representation_warmup":
+                    diffusion_loss = naction.new_tensor(0.0)
+                else:
+                    # Sample noise to add to actions：为每条轨迹采样高斯噪声
+                    noise = torch.randn_like(naction)
+
+                    # Sample a diffusion iteration for each data point：每个样本随机选择一个时间步
+                    timesteps = torch.randint(
+                        0, noise_scheduler.config.num_train_timesteps,
+                        (B,), device=device
+                    ).long()
+
+                    # Add noise：根据对应时间步的噪声水平，把轨迹从“干净”推到“噪声域”
+                    noisy_action = noise_scheduler.add_noise(
+                        naction, noise, timesteps)
+
+                    # 预测噪声残差，使得在该时间步可以从 noisy_action 恢复出原始 clean action
+                    noise_pred = model("noise_pred_net", sample=noisy_action, timestep=timesteps, global_cond=obsgoal_cond)
+
+                    # L2 loss：在时间和维度上求平均，再用 action_mask 做样本级加权
+                    diffusion_loss = action_reduce(F.mse_loss(noise_pred, noise, reduction="none"))
+
+                # Total loss：距离与扩散损失的加权和
+                if train_stage == "representation_warmup":
+                    loss = dist_loss + nav_aux_loss
+                else:
+                    loss = alpha * dist_loss + (1-alpha) * diffusion_loss + nav_aux_loss
 
             # 反向传播并更新参数
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            scaler.scale(loss).backward()
             if max_grad_norm is not None:
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             # 同步更新 EMA 模型，用于评估与可视化
             ema_model.step(model)
@@ -390,27 +439,29 @@ def train_nomad(
                 }
 
 
-            if print_log_freq != 0 and i % print_log_freq == 0:
+            should_sample_metrics = sampling_metrics_freq != 0 and i % sampling_metrics_freq == 0
+            if should_sample_metrics:
                 ema_was_training = ema_eval_model.training
                 ema_eval_model.eval()
                 with torch.inference_mode():
-                    losses = _compute_losses_nomad(
-                                ema_eval_model,
-                                noise_scheduler,
-                                batch_obs_images,
-                                batch_goal_images,
-                                distance.to(device, non_blocking=non_blocking),
-                                actions.to(device, non_blocking=non_blocking),
-                                device,
-                                action_mask.to(device, non_blocking=non_blocking),
-                                guidance_scale_min=goal_guidance_min,
-                                guidance_scale_max=goal_guidance_max,
-                                guidance_scale_power=goal_guidance_power,
-                                use_adaptive_guidance=use_adaptive_guidance,
-                                guidance_confidence_weight=guidance_confidence_weight,
-                                guidance_uncertainty_weight=guidance_uncertainty_weight,
-                                guidance_distance_scale=guidance_distance_scale,
-                            )
+                    with _amp_context(amp_enabled):
+                        losses = _compute_losses_nomad(
+                                    ema_eval_model,
+                                    noise_scheduler,
+                                    batch_obs_images,
+                                    batch_goal_images,
+                                    distance,
+                                    actions,
+                                    device,
+                                    action_mask,
+                                    guidance_scale_min=goal_guidance_min,
+                                    guidance_scale_max=goal_guidance_max,
+                                    guidance_scale_power=goal_guidance_power,
+                                    use_adaptive_guidance=use_adaptive_guidance,
+                                    guidance_confidence_weight=guidance_confidence_weight,
+                                    guidance_uncertainty_weight=guidance_uncertainty_weight,
+                                    guidance_distance_scale=guidance_distance_scale,
+                                )
                 if ema_was_training:
                     ema_eval_model.train()
                 
@@ -422,8 +473,7 @@ def train_nomad(
                 data_log = {}
                 for key, logger in loggers.items():
                     data_log[logger.full_name()] = logger.latest()
-                    if print_log_freq != 0 and i % print_log_freq == 0:
-                        print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
+                    print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
 
                 if wandb_payload is not None:
                     wandb_payload.update(data_log)
@@ -431,35 +481,36 @@ def train_nomad(
             if wandb_payload is not None:
                 wandb.log(wandb_payload, commit=True)
 
-            if image_log_freq != 0 and i % image_log_freq == 0:
+            if should_log_images:
                 ema_was_training = ema_eval_model.training
                 ema_eval_model.eval()
                 with torch.inference_mode():
-                    visualize_diffusion_action_distribution(
-                        ema_eval_model,
-                        noise_scheduler,
-                        batch_obs_images,
-                        batch_goal_images,
-                        batch_viz_obs_images,
-                        batch_viz_goal_images,
-                        actions,
-                        distance,
-                        goal_pos,
-                        device,
-                        "train",
-                        project_folder,
-                        epoch,
-                        num_images_log,
-                        30,
-                        use_wandb,
-                        goal_guidance_min=goal_guidance_min,
-                        goal_guidance_max=goal_guidance_max,
-                        goal_guidance_power=goal_guidance_power,
-                        use_adaptive_guidance=use_adaptive_guidance,
-                        guidance_confidence_weight=guidance_confidence_weight,
-                        guidance_uncertainty_weight=guidance_uncertainty_weight,
-                        guidance_distance_scale=guidance_distance_scale,
-                    )
+                    with _amp_context(amp_enabled):
+                        visualize_diffusion_action_distribution(
+                            ema_eval_model,
+                            noise_scheduler,
+                            batch_obs_images,
+                            batch_goal_images,
+                            batch_viz_obs_images,
+                            batch_viz_goal_images,
+                            actions,
+                            distance,
+                            goal_pos,
+                            device,
+                            "train",
+                            project_folder,
+                            epoch,
+                            num_images_log,
+                            30,
+                            use_wandb,
+                            goal_guidance_min=goal_guidance_min,
+                            goal_guidance_max=goal_guidance_max,
+                            goal_guidance_power=goal_guidance_power,
+                            use_adaptive_guidance=use_adaptive_guidance,
+                            guidance_confidence_weight=guidance_confidence_weight,
+                            guidance_uncertainty_weight=guidance_uncertainty_weight,
+                            guidance_distance_scale=guidance_distance_scale,
+                        )
                 if ema_was_training:
                     ema_eval_model.train()
 
@@ -480,6 +531,8 @@ def evaluate_nomad(
     num_images_log: int = 8,
     eval_fraction: float = 0.25,
     use_wandb: bool = True,
+    sampling_metrics_freq: int = 1000,
+    use_amp: bool = True,
     goal_guidance_min: float = 0.25,
     goal_guidance_max: float = 1.75,
     goal_guidance_power: float = 1.5,
@@ -508,12 +561,13 @@ def evaluate_nomad(
         eval_fraction (float): fraction of data to use for evaluation
         use_wandb (bool): whether to use wandb for logging
     """
-    goal_mask_prob = torch.clip(torch.tensor(goal_mask_prob), 0, 1)
+    goal_mask_prob = float(torch.clip(torch.tensor(goal_mask_prob), 0, 1).item())
     ema_model = ema_model.averaged_model
     ema_model.eval()
     non_blocking = device.type == "cuda"
     log_window_size = max(int(print_log_freq), 1)
     num_batches = len(dataloader)
+    amp_enabled = bool(use_amp and device.type == "cuda")
     eval_generator = torch.Generator()
     eval_generator.manual_seed(0)
 
@@ -562,12 +616,19 @@ def evaluate_nomad(
                 ) = data
                 
                 obs_images = torch.split(obs_image, 3, dim=1)
-                batch_viz_obs_images = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE[::-1])
-                batch_viz_goal_images = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE[::-1])
+                should_log_images = image_log_freq != 0 and i % image_log_freq == 0
+                if should_log_images:
+                    batch_viz_obs_images = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE[::-1])
+                    batch_viz_goal_images = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE[::-1])
+                else:
+                    batch_viz_obs_images = None
+                    batch_viz_goal_images = None
                 batch_obs_images = [transform(obs) for obs in obs_images]
                 batch_obs_images = torch.cat(batch_obs_images, dim=1).to(device, non_blocking=non_blocking)
                 batch_goal_images = transform(goal_image).to(device, non_blocking=non_blocking)
+                actions = actions.to(device, non_blocking=non_blocking)
                 action_mask = action_mask.to(device, non_blocking=non_blocking)
+                distance = distance.float().to(device, non_blocking=non_blocking)
 
                 B = actions.shape[0]
 
@@ -578,56 +639,54 @@ def evaluate_nomad(
                 goal_mask = torch.ones_like(rand_goal_mask).long().to(device, non_blocking=non_blocking)
                 no_mask = torch.zeros_like(rand_goal_mask).long().to(device, non_blocking=non_blocking)
 
-                rand_mask_cond = ema_model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=rand_goal_mask)
+                with _amp_context(amp_enabled):
+                    rand_mask_cond = ema_model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=rand_goal_mask)
 
-                obsgoal_cond = ema_model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=no_mask)
-                obsgoal_cond = obsgoal_cond.flatten(start_dim=1)
+                    obsgoal_cond = ema_model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=no_mask)
+                    obsgoal_cond = obsgoal_cond.flatten(start_dim=1)
 
-                goal_mask_cond = ema_model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=goal_mask)
+                    goal_mask_cond = ema_model("vision_encoder", obs_img=batch_obs_images, goal_img=batch_goal_images, input_goal_mask=goal_mask)
 
-                distance = distance.to(device, non_blocking=non_blocking)
+                    deltas = get_delta_torch(actions)
+                    naction = normalize_data_torch(deltas, ACTION_STATS)
+                    assert naction.shape[-1] == 2, "action dim must be 2"
 
-                deltas = get_delta(actions)
-                ndeltas = normalize_data(deltas, ACTION_STATS)
-                naction = from_numpy(ndeltas).to(device, non_blocking=non_blocking)
-                assert naction.shape[-1] == 2, "action dim must be 2"
+                    # Sample noise to add to actions
+                    noise = torch.randn(naction.shape, generator=eval_generator).to(
+                        device, non_blocking=non_blocking
+                    )
 
-                # Sample noise to add to actions
-                noise = torch.randn(naction.shape, generator=eval_generator).to(
-                    device, non_blocking=non_blocking
-                )
+                    # Sample a diffusion iteration for each data point
+                    timesteps = torch.randint(
+                        0, noise_scheduler.config.num_train_timesteps,
+                        (B,),
+                        generator=eval_generator,
+                    ).long().to(device, non_blocking=non_blocking)
 
-                # Sample a diffusion iteration for each data point
-                timesteps = torch.randint(
-                    0, noise_scheduler.config.num_train_timesteps,
-                    (B,),
-                    generator=eval_generator,
-                ).long().to(device, non_blocking=non_blocking)
+                    noisy_actions = noise_scheduler.add_noise(
+                        naction, noise, timesteps)
 
-                noisy_actions = noise_scheduler.add_noise(
-                    naction, noise, timesteps)
+                    ### RANDOM MASK ERROR ###
+                    # Predict the noise residual
+                    rand_mask_noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=rand_mask_cond)
 
-                ### RANDOM MASK ERROR ###
-                # Predict the noise residual
-                rand_mask_noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=rand_mask_cond)
-                
-                # L2 loss
-                rand_mask_loss = nn.functional.mse_loss(rand_mask_noise_pred, noise)
-                
-                ### NO MASK ERROR ###
-                # Predict the noise residual
-                no_mask_noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=obsgoal_cond)
-                
-                # L2 loss
-                no_mask_loss = nn.functional.mse_loss(no_mask_noise_pred, noise)
+                    # L2 loss
+                    rand_mask_loss = nn.functional.mse_loss(rand_mask_noise_pred, noise)
 
-                ### GOAL MASK ERROR ###
-                # predict the noise residual
-                goal_mask_noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=goal_mask_cond)
-                
-                # L2 loss
-                goal_mask_loss = nn.functional.mse_loss(goal_mask_noise_pred, noise)
-                
+                    ### NO MASK ERROR ###
+                    # Predict the noise residual
+                    no_mask_noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=obsgoal_cond)
+
+                    # L2 loss
+                    no_mask_loss = nn.functional.mse_loss(no_mask_noise_pred, noise)
+
+                    ### GOAL MASK ERROR ###
+                    # predict the noise residual
+                    goal_mask_noise_pred = ema_model("noise_pred_net", sample=noisy_actions, timestep=timesteps, global_cond=goal_mask_cond)
+
+                    # L2 loss
+                    goal_mask_loss = nn.functional.mse_loss(goal_mask_noise_pred, noise)
+
                 # Logging
                 loss_cpu = rand_mask_loss.item()
                 tepoch.set_postfix(loss=loss_cpu)
@@ -641,25 +700,27 @@ def evaluate_nomad(
                         "diffusion_eval_loss (goal masking)": goal_mask_loss.item(),
                     }
 
-                if print_log_freq != 0 and i % print_log_freq == 0:
-                    losses = _compute_losses_nomad(
-                                ema_model,
-                                noise_scheduler,
-                                batch_obs_images,
-                                batch_goal_images,
-                                distance.to(device, non_blocking=non_blocking),
-                                actions.to(device, non_blocking=non_blocking),
-                                device,
-                                action_mask.to(device, non_blocking=non_blocking),
-                                guidance_scale_min=goal_guidance_min,
-                                guidance_scale_max=goal_guidance_max,
-                                guidance_scale_power=goal_guidance_power,
-                                use_adaptive_guidance=use_adaptive_guidance,
-                                guidance_confidence_weight=guidance_confidence_weight,
-                                guidance_uncertainty_weight=guidance_uncertainty_weight,
-                                guidance_distance_scale=guidance_distance_scale,
-                                generator=eval_generator,
-                            )
+                should_sample_metrics = sampling_metrics_freq != 0 and i % sampling_metrics_freq == 0
+                if should_sample_metrics:
+                    with _amp_context(amp_enabled):
+                        losses = _compute_losses_nomad(
+                                    ema_model,
+                                    noise_scheduler,
+                                    batch_obs_images,
+                                    batch_goal_images,
+                                    distance,
+                                    actions,
+                                    device,
+                                    action_mask,
+                                    guidance_scale_min=goal_guidance_min,
+                                    guidance_scale_max=goal_guidance_max,
+                                    guidance_scale_power=goal_guidance_power,
+                                    use_adaptive_guidance=use_adaptive_guidance,
+                                    guidance_confidence_weight=guidance_confidence_weight,
+                                    guidance_uncertainty_weight=guidance_uncertainty_weight,
+                                    guidance_distance_scale=guidance_distance_scale,
+                                    generator=eval_generator,
+                                )
                     
                     for key, value in losses.items():
                         if key in loggers:
@@ -669,8 +730,7 @@ def evaluate_nomad(
                     data_log = {}
                     for key, logger in loggers.items():
                         data_log[logger.full_name()] = logger.latest()
-                        if print_log_freq != 0 and i % print_log_freq == 0:
-                            print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
+                        print(f"(epoch {epoch}) (batch {i}/{num_batches - 1}) {logger.display()}")
 
                     if wandb_payload is not None:
                         wandb_payload.update(data_log)
@@ -678,33 +738,34 @@ def evaluate_nomad(
                 if wandb_payload is not None:
                     wandb.log(wandb_payload, commit=True)
 
-                if image_log_freq != 0 and i % image_log_freq == 0:
-                    visualize_diffusion_action_distribution(
-                        ema_model,
-                        noise_scheduler,
-                        batch_obs_images,
-                        batch_goal_images,
-                        batch_viz_obs_images,
-                        batch_viz_goal_images,
-                        actions,
-                        distance,
-                        goal_pos,
-                        device,
-                        eval_type,
-                        project_folder,
-                        epoch,
-                        num_images_log,
-                        30,
-                        use_wandb,
-                        goal_guidance_min=goal_guidance_min,
-                        goal_guidance_max=goal_guidance_max,
-                        goal_guidance_power=goal_guidance_power,
-                        use_adaptive_guidance=use_adaptive_guidance,
-                        guidance_confidence_weight=guidance_confidence_weight,
-                        guidance_uncertainty_weight=guidance_uncertainty_weight,
-                        guidance_distance_scale=guidance_distance_scale,
-                        generator=eval_generator,
-                    )
+                if should_log_images:
+                    with _amp_context(amp_enabled):
+                        visualize_diffusion_action_distribution(
+                            ema_model,
+                            noise_scheduler,
+                            batch_obs_images,
+                            batch_goal_images,
+                            batch_viz_obs_images,
+                            batch_viz_goal_images,
+                            actions,
+                            distance,
+                            goal_pos,
+                            device,
+                            eval_type,
+                            project_folder,
+                            epoch,
+                            num_images_log,
+                            30,
+                            use_wandb,
+                            goal_guidance_min=goal_guidance_min,
+                            goal_guidance_max=goal_guidance_max,
+                            goal_guidance_power=goal_guidance_power,
+                            use_adaptive_guidance=use_adaptive_guidance,
+                            guidance_confidence_weight=guidance_confidence_weight,
+                            guidance_uncertainty_weight=guidance_uncertainty_weight,
+                            guidance_distance_scale=guidance_distance_scale,
+                            generator=eval_generator,
+                        )
 
 
 # normalize data
@@ -737,13 +798,10 @@ def get_delta(actions):
 def get_action(diffusion_output, action_stats=ACTION_STATS):
     # diffusion_output: (B, 2*T+1, 1)
     # return: (B, T-1)
-    device = diffusion_output.device
     ndeltas = diffusion_output
     ndeltas = ndeltas.reshape(ndeltas.shape[0], -1, 2)
-    ndeltas = to_numpy(ndeltas)
-    ndeltas = unnormalize_data(ndeltas, action_stats)
-    actions = np.cumsum(ndeltas, axis=1)
-    return from_numpy(actions).to(device)
+    ndeltas = unnormalize_data_torch(ndeltas, action_stats)
+    return torch.cumsum(ndeltas, dim=1)
 
 
 def diffusion_guidance_scale(
