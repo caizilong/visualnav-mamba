@@ -23,6 +23,9 @@ warmup_epochs: 3
 cyclic_period: 10
 plateau_patience: 3
 plateau_factor: 0.5
+save_epoch_checkpoints: false
+save_training_state: false
+save_optimizer_state: false
 
 # NoMaD-Mamba only
 model_type: nomad

@@ -330,12 +330,27 @@ def main(config):
         load_project_folder = os.path.join("/root/autodl-tmp/logs", config["load_run"])
         print("Loading model from", load_project_folder)
 
-        latest_path = os.path.join(load_project_folder, "latest.pth")
         training_latest_path = os.path.join(load_project_folder, "training_latest.pth")
-        if os.path.exists(training_latest_path):
-            latest_path = training_latest_path
-
-        latest_checkpoint = torch.load(latest_path, map_location="cpu")
+        latest_path = os.path.join(load_project_folder, "latest.pth")
+        progress_latest_path = os.path.join(load_project_folder, "training_progress_latest.pth")
+        checkpoint_candidates = (
+            [training_latest_path, latest_path]
+            if os.path.exists(training_latest_path)
+            else [latest_path]
+        )
+        latest_checkpoint = None
+        for checkpoint_path in checkpoint_candidates:
+            try:
+                latest_checkpoint = torch.load(checkpoint_path, map_location="cpu")
+                latest_path = checkpoint_path
+                break
+            except Exception as exc:
+                if checkpoint_path == checkpoint_candidates[-1]:
+                    raise
+                print(
+                    f"Skipping unreadable checkpoint {checkpoint_path}: {exc}. "
+                    f"Falling back to {checkpoint_candidates[-1]}."
+                )
         if isinstance(latest_checkpoint, dict) and (
             "model_state_dict" in latest_checkpoint or "ema_state_dict" in latest_checkpoint
         ):
@@ -344,6 +359,17 @@ def main(config):
         load_model(model, "nomad", latest_checkpoint)
         if isinstance(latest_checkpoint, dict) and "epoch" in latest_checkpoint:
             current_epoch = latest_checkpoint["epoch"] + 1
+        elif os.path.exists(progress_latest_path):
+            progress_checkpoint = torch.load(progress_latest_path, map_location="cpu")
+            if isinstance(progress_checkpoint, dict) and "epoch" in progress_checkpoint:
+                current_epoch = int(progress_checkpoint["epoch"]) + 1
+
+        if resume_checkpoint is None:
+            ema_latest_path = os.path.join(load_project_folder, "ema_latest.pth")
+            if os.path.exists(ema_latest_path):
+                resume_checkpoint = {
+                    "ema_state_dict": torch.load(ema_latest_path, map_location="cpu")
+                }
 
     if len(logical_gpu_ids) > 1:
         model = nn.DataParallel(model, device_ids=logical_gpu_ids)
@@ -528,6 +554,9 @@ def main(config):
             ),
             max_grad_norm=max_grad_norm,
             ema_model=ema_model,
+            save_epoch_checkpoints=bool(config.get("save_epoch_checkpoints", False)),
+            save_training_state=bool(config.get("save_training_state", False)),
+            save_optimizer_state=bool(config.get("save_optimizer_state", False)),
         )
         current_epoch += stage_epochs
 

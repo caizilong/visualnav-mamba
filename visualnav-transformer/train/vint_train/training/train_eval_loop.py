@@ -55,6 +55,23 @@ def serialize_ema_model(ema_model: EMAModel) -> dict:
     return state
 
 
+def _atomic_torch_save(obj, path: str) -> None:
+    tmp_path = f"{path}.tmp"
+    try:
+        torch.save(obj, tmp_path)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"Failed to save checkpoint to {path}. Check disk space, quota, "
+            "and filesystem write stability."
+        ) from exc
+
+
 def train_eval_loop_nomad(
     train_model: bool,
     model: nn.Module,
@@ -92,9 +109,13 @@ def train_eval_loop_nomad(
     aux_negative_distance_threshold: float = 20.0,
     max_grad_norm: Optional[float] = None,
     ema_model: Optional[EMAModel] = None,
+    save_epoch_checkpoints: bool = False,
+    save_training_state: bool = False,
+    save_optimizer_state: bool = False,
 ):
     latest_path = os.path.join(project_folder, "latest.pth")
     training_latest_path = os.path.join(project_folder, "training_latest.pth")
+    progress_latest_path = os.path.join(project_folder, "training_progress_latest.pth")
 
     if ema_model is None:
         ema_model = EMAModel(model=model, power=0.75)
@@ -139,33 +160,40 @@ def train_eval_loop_nomad(
             if lr_scheduler is not None:
                 lr_scheduler.step()
 
-        ema_epoch_path = os.path.join(project_folder, f"ema_{epoch}.pth")
         ema_latest_path = os.path.join(project_folder, "ema_latest.pth")
         ema_model_state_dict = _unwrap_model(ema_model.averaged_model).state_dict()
-        torch.save(ema_model_state_dict, ema_epoch_path)
-        torch.save(ema_model_state_dict, ema_latest_path)
+        if save_epoch_checkpoints:
+            ema_epoch_path = os.path.join(project_folder, f"ema_{epoch}.pth")
+            _atomic_torch_save(ema_model_state_dict, ema_epoch_path)
+        _atomic_torch_save(ema_model_state_dict, ema_latest_path)
 
-        model_epoch_path = os.path.join(project_folder, f"{epoch}.pth")
         raw_model = _unwrap_model(model)
         model_state_dict = raw_model.state_dict()
-        torch.save(model_state_dict, model_epoch_path)
-        torch.save(model_state_dict, latest_path)
+        if save_epoch_checkpoints:
+            model_epoch_path = os.path.join(project_folder, f"{epoch}.pth")
+            _atomic_torch_save(model_state_dict, model_epoch_path)
+        _atomic_torch_save(model_state_dict, latest_path)
 
-        training_state = {
-            "epoch": epoch,
-            "model_state_dict": model_state_dict,
-            "ema_state_dict": serialize_ema_model(ema_model),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": lr_scheduler.state_dict() if lr_scheduler is not None else None,
-        }
-        torch.save(training_state, training_latest_path)
+        if save_optimizer_state:
+            latest_optimizer_path = os.path.join(project_folder, "optimizer_latest.pth")
+            _atomic_torch_save(optimizer.state_dict(), latest_optimizer_path)
 
-        latest_optimizer_path = os.path.join(project_folder, "optimizer_latest.pth")
-        torch.save(optimizer.state_dict(), latest_optimizer_path)
+            if lr_scheduler is not None:
+                latest_scheduler_path = os.path.join(project_folder, "scheduler_latest.pth")
+                _atomic_torch_save(lr_scheduler.state_dict(), latest_scheduler_path)
 
-        if lr_scheduler is not None:
-            latest_scheduler_path = os.path.join(project_folder, "scheduler_latest.pth")
-            torch.save(lr_scheduler.state_dict(), latest_scheduler_path)
+        progress_state = {"epoch": epoch}
+        _atomic_torch_save(progress_state, progress_latest_path)
+
+        if save_training_state:
+            training_state = {
+                "epoch": epoch,
+                "model_state_dict": model_state_dict,
+                "ema_state_dict": serialize_ema_model(ema_model),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": lr_scheduler.state_dict() if lr_scheduler is not None else None,
+            }
+            _atomic_torch_save(training_state, training_latest_path)
 
         if (epoch + 1) % eval_freq == 0:
             for dataset_type in test_dataloaders:

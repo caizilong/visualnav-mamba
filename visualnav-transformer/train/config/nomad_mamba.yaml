@@ -30,6 +30,9 @@ warmup_epochs: 3
 cyclic_period: 10
 plateau_patience: 3
 plateau_factor: 0.5
+save_epoch_checkpoints: false              # 默认只保留 latest/ema_latest，避免每轮保存大模型导致磁盘写满
+save_training_state: false                 # 默认不保存包含 model+EMA+optimizer 的巨型 training_latest.pth
+save_optimizer_state: false                # 默认不保存AdamW动量状态；需要完整断点恢复时再设为true
 seed: 0
 
 # ---------------- 模型参数 ----------------
