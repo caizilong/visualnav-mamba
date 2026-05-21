@@ -2,9 +2,9 @@ project_name: nomad
 run_name: nomad_mamba               
 
 # ---------------- 多阶段训练配置 ----------------
-multi_stage: true                         # 开启一键多阶段训练
+multi_stage: false                         # 开启一键多阶段训练
 stage1_epochs: 1                         # representation_warmup 阶段轮数
-stage2_epochs: 100                         # diffusion_tuning 阶段轮数
+stage2_epochs: 1                         # diffusion_tuning 阶段轮数
 stage3_epochs: 0                         # finetune 阶段轮数；短时间解冻backbone做最终适配
 ablation_unfreeze_all: true             # 消融实验开关：若为true，则无视上述阶段，全程解冻所有参数进行训练
 
@@ -12,23 +12,23 @@ ablation_unfreeze_all: true             # 消融实验开关：若为true，则�
 use_wandb: True                           # 是否启用 wandb
 train: True
 train_stage: representation_warmup        # representation_warmup / diffusion_tuning / finetune
-freeze_backbone: true                     # 预热和策略训练阶段默认冻结 DINOv3，finetune 可设为 false
+freeze_backbone: false                     # 预热和策略训练阶段默认冻结 DINOv3，finetune 可设为 false
 batch_size: 128
-eval_batch_size: 128                       # 评估时使用较小的batch_size以避免OOM
+eval_batch_size: 128                      # 评估时使用较小的batch_size以避免OOM
 epochs: 100
 gpu_ids: [0]
-num_workers: 16
-eval_num_workers: 4                       # 评估DataLoader workers；减少评估阶段I/O等待
-use_amp: true                             # CUDA混合精度训练；如出现nan/inf可设为false回退fp32
-lr: 5e-8
-use_differential_lr: true                # 对 backbone 与新加模块使用不同学习率
+num_workers: 4
+eval_num_workers: 2                       # 评估DataLoader workers；减少评估阶段I/O等待
+use_amp: false                             # CUDA混合精度训练；如出现nan/inf可设为false回退fp32
+lr: 5e-5
+use_differential_lr: false                # 对 backbone 与新加模块使用不同学习率
 backbone_lr: 5e-5                        # 预训练视觉 backbone 用更小 LR，减少全参数微调的不稳定
 optimizer: adamw
 clipping: True
 max_norm: 1.
 scheduler: "cosine"
 warmup: True
-warmup_epochs: 3
+warmup_epochs: 5
 cyclic_period: 10
 plateau_patience: 3
 plateau_factor: 0.5
@@ -53,19 +53,19 @@ encoding_size: 384                        # 对齐 ViT-S / DINOv3 的隐藏维�
 obs_encoder: vit_small_patch16_dinov3     # 观测编码器（ViT-S / DINOv3）
 goal_encoder: vit_small_patch16_dinov3    # 目标编码器类型；share_visual_backbone=true 时会实际共享主干
 share_visual_backbone: true               # obs / goal 共用同一套 DINOv3 参数
-use_visual_adapter: true                  # 是否启用 backbone 后的 obs/goal 轻量残差 adapter；消融实验可设为 false
+use_visual_adapter: false                  # 是否启用 backbone 后的 obs/goal 轻量残差 adapter；消融实验可设为 false
 adapter_hidden_dim: 96                    # 轻量 adapter 的瓶颈维度（约为 hidden size 的 1/4）
 adapter_scale: 0.1                        # 小尺度残差注入
 use_spatial_mamba_tokens: false           # 消融开关：false=每帧全局池化1个token；true=保留空间tokens并展平成长序列送入Mamba（DINOv3优化实验推荐true）
 drop_backbone_prefix_tokens: true         # 空间token模式下丢弃ViT的CLS/register等prefix tokens，只保留patch tokens
 vit_global_pool: patch_mean                 # 非空间token模式下的ViT池化：all_mean/cls/patch_mean/cls_patch_mean（DINOv3优化实验推荐patch_mean）
-bidirectional_mamba: true               # 前向/反向 Mamba 同时建模，让 goal 信息反向传播到上下文
-use_goal_gate: true                     # 是否启用当前帧与 goal 的门控融合
-use_goal_film: true                     # 是否启用 goal-aware FiLM 调制历史 observation tokens
-use_goal_mamba_fusion: true             # 用 goal-observation 匹配特征自适应融合前向/反向 Mamba 信息流
+bidirectional_mamba: false               # 前向/反向 Mamba 同时建模，让 goal 信息反向传播到上下文
+use_goal_gate: false                     # 是否启用当前帧与 goal 的门控融合
+use_goal_film: false                    # 是否启用 goal-aware FiLM 调制历史 observation tokens
+use_goal_mamba_fusion: false             # 用 goal-observation 匹配特征自适应融合前向/反向 Mamba 信息流
 goal_fusion_hidden_dim: 768             # 目标门控融合 MLP 的隐藏维度（= 2 * encoding_size）
 goal_mamba_fusion_hidden_dim: 384       # goal-modulated bidirectional state-space fusion 的隐藏维度
-use_navigation_aux: true                # 启用导航几何辅助监督，让 DINO/adapter 学习 goal-relative affordance
+use_navigation_aux: false                # 启用导航几何辅助监督，让 DINO/adapter 学习 goal-relative affordance
 nav_aux_hidden_dim: 192                 # goal_pos 辅助预测头隐藏维度
 nav_goal_pos_loss_weight: 0.05          # 局部 goal 相对位置预测辅助损失权重
 nav_contrastive_loss_weight: 0.01       # obs-goal 导航表征对比损失权重
@@ -98,17 +98,17 @@ goal_mask_prob: 0.5
 normalize: True
 
 # ---------------- 推理时 guidance 调度 ----------------
-goal_guidance_min: 0.25                  # 早期 denoising 更接近无条件分支，鼓励探索
-goal_guidance_max: 1.75                  # 后期 denoising 强化目标条件，收敛到目标导航
-goal_guidance_power: 1.25                # 非线性调度，后段更快增强 goal guidance
-use_adaptive_guidance: true              # 根据目标距离置信度与多样本动作不确定性动态调节 guidance
+goal_guidance_min: 1.0                  # 早期 denoising 更接近无条件分支，鼓励探索
+goal_guidance_max: 1.0                  # 后期 denoising 强化目标条件，收敛到目标导航
+goal_guidance_power: 1.0                # 非线性调度，后段更快增强 goal guidance
+use_adaptive_guidance: false              # 根据目标距离置信度与多样本动作不确定性动态调节 guidance
 guidance_confidence_weight: 0.35         # 目标越可信，guidance 越强
 guidance_uncertainty_weight: 0.25        # 动作样本越分散，guidance 越保守
 guidance_distance_scale: 10.0            # 距离预测转目标置信度的指数尺度
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal
-context_size: 8                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
+context_size: 6                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
 alpha: 1e-4                               # 与原 NoMaD 相同：距离损失权重很小
 
 # ---------------- 距离 / 动作 标签范围 ----------------
@@ -194,4 +194,4 @@ pairwise_test_freq: 0
 sampling_metrics_freq: 1000             # 扩散采样指标很慢，单独低频运行；0=关闭
 eval_fraction: 0.1
 wandb_log_freq: 200                    # 与 print 类似或更大，避免过于频繁
-eval_freq: 5
+eval_freq: 1
