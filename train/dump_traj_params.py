@@ -3,7 +3,7 @@
 导出轨迹的 position 与 yaw 到文本或 CSV 文件。
 
 用法示例：
-  python3 dump_traj_params.py -d /workspace/datasets/carla_dataset -t trajectory_000000 -o /workspace/visualnav-transformer/train/trajectory_000000_pos_yaw.txt
+  python3 dump_traj_params.py -d /workspace/datasets/carla_dataset -t trajectory_000000 -o /workspace/train/trajectory_000000_pos_yaw.txt
 """
 
 import argparse

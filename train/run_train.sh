@@ -1,7 +1,7 @@
 #!/bin/bash
 # source ~/anaconda3/etc/profile.d/conda.sh
 # conda activate mamba
-# export PYTHONPATH="/workspace/visualnav-transformer/diffusion_policy:$PYTHONPATH"
+# export PYTHONPATH="/workspace/diffusion_policy:$PYTHONPATH"
 
 # 设置 HuggingFace 镜像解决网络超时问题
 export HF_ENDPOINT="https://hf-mirror.com"
