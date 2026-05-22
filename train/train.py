@@ -239,15 +239,18 @@ def main(config):
 
     train_dataset = ConcatDataset(train_dataset)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config["batch_size"],
-        shuffle=True,
-        num_workers=config["num_workers"],
-        drop_last=False,
-        persistent_workers=config["num_workers"] > 0,
-        pin_memory=torch.cuda.is_available(),
-    )
+    train_num_workers = int(config["num_workers"])
+    train_loader_kwargs = {
+        "batch_size": config["batch_size"],
+        "shuffle": True,
+        "num_workers": train_num_workers,
+        "drop_last": False,
+        "persistent_workers": train_num_workers > 0,
+        "pin_memory": torch.cuda.is_available(),
+    }
+    if train_num_workers > 0:
+        train_loader_kwargs["prefetch_factor"] = int(config.get("prefetch_factor", 4))
+    train_loader = DataLoader(train_dataset, **train_loader_kwargs)
 
     if "eval_batch_size" not in config:
         config["eval_batch_size"] = config["batch_size"]
@@ -257,15 +260,17 @@ def main(config):
     test_dataloaders = {}
     for dataset_type, dataset in test_datasets.items():
         eval_num_workers = int(config["eval_num_workers"])
-        test_dataloaders[dataset_type] = DataLoader(
-            dataset,
-            batch_size=config["eval_batch_size"],
-            shuffle=False,
-            num_workers=eval_num_workers,
-            drop_last=False,
-            pin_memory=torch.cuda.is_available(),
-            persistent_workers=eval_num_workers > 0,
-        )
+        eval_loader_kwargs = {
+            "batch_size": config["eval_batch_size"],
+            "shuffle": False,
+            "num_workers": eval_num_workers,
+            "drop_last": False,
+            "pin_memory": torch.cuda.is_available(),
+            "persistent_workers": eval_num_workers > 0,
+        }
+        if eval_num_workers > 0:
+            eval_loader_kwargs["prefetch_factor"] = int(config.get("eval_prefetch_factor", config.get("prefetch_factor", 4)))
+        test_dataloaders[dataset_type] = DataLoader(dataset, **eval_loader_kwargs)
 
     def _training_cleanup():
         _shutdown_dataloader_workers(train_loader)

@@ -17,9 +17,10 @@ batch_size: 128
 eval_batch_size: 128                      # 评估时使用较小的batch_size以避免OOM
 epochs: 100
 gpu_ids: [0]
-num_workers: 4
-eval_num_workers: 2                       # 评估DataLoader workers；减少评估阶段I/O等待
-use_amp: false                             # CUDA混合精度训练；如出现nan/inf可设为false回退fp32
+num_workers: 12
+eval_num_workers: 4                       # 评估DataLoader workers；减少评估阶段I/O等待
+use_amp: true                              # CUDA混合精度训练；如出现nan/inf可设为false回退fp32
+prefetch_factor: 4                       # 每个worker预取batch数，减少GPU等DataLoader
 lr: 5e-5
 use_differential_lr: false                # 对 backbone 与新加模块使用不同学习率
 backbone_lr: 5e-5                        # 预训练视觉 backbone 用更小 LR，减少全参数微调的不稳定

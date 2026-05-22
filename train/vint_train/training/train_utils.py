@@ -66,6 +66,23 @@ def get_delta_torch(actions: torch.Tensor) -> torch.Tensor:
     return ex_actions[:, 1:] - ex_actions[:, :-1]
 
 
+def normalize_image_tensor(images: torch.Tensor) -> torch.Tensor:
+    channels = images.shape[1]
+    if channels % 3 != 0:
+        raise ValueError(f"Expected image channels to be a multiple of 3, got {channels}")
+    mean = torch.as_tensor(
+        [0.485, 0.456, 0.406], dtype=images.dtype, device=images.device
+    ).view(1, 3, 1, 1)
+    std = torch.as_tensor(
+        [0.229, 0.224, 0.225], dtype=images.dtype, device=images.device
+    ).view(1, 3, 1, 1)
+    repeats = channels // 3
+    if repeats > 1:
+        mean = mean.repeat(1, repeats, 1, 1)
+        std = std.repeat(1, repeats, 1, 1)
+    return (images - mean) / std
+
+
 # Train utils for NOMAD
 
 def _compute_losses_nomad(
@@ -323,17 +340,20 @@ def train_nomad(
             ) = data
             
             # -------- 1) 图像预处理与可视化图像抽取 --------
-            obs_images = torch.split(obs_image, 3, dim=1)
             should_log_images = image_log_freq != 0 and i % image_log_freq == 0
             if should_log_images:
-                batch_viz_obs_images = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE[::-1])
+                last_obs_image = obs_image[:, -3:, :, :]
+                batch_viz_obs_images = TF.resize(last_obs_image, VISUALIZATION_IMAGE_SIZE[::-1])
                 batch_viz_goal_images = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE[::-1])
             else:
                 batch_viz_obs_images = None
                 batch_viz_goal_images = None
-            batch_obs_images = [transform(obs) for obs in obs_images]
-            batch_obs_images = torch.cat(batch_obs_images, dim=1).to(device, non_blocking=non_blocking)
-            batch_goal_images = transform(goal_image).to(device, non_blocking=non_blocking)
+            batch_obs_images = normalize_image_tensor(
+                obs_image.to(device, non_blocking=non_blocking)
+            )
+            batch_goal_images = normalize_image_tensor(
+                goal_image.to(device, non_blocking=non_blocking)
+            )
             actions = actions.to(device, non_blocking=non_blocking)
             action_mask = action_mask.to(device, non_blocking=non_blocking)
             goal_pos = goal_pos.float().to(device, non_blocking=non_blocking)
@@ -615,17 +635,20 @@ def evaluate_nomad(
                     action_mask,
                 ) = data
                 
-                obs_images = torch.split(obs_image, 3, dim=1)
                 should_log_images = image_log_freq != 0 and i % image_log_freq == 0
                 if should_log_images:
-                    batch_viz_obs_images = TF.resize(obs_images[-1], VISUALIZATION_IMAGE_SIZE[::-1])
+                    last_obs_image = obs_image[:, -3:, :, :]
+                    batch_viz_obs_images = TF.resize(last_obs_image, VISUALIZATION_IMAGE_SIZE[::-1])
                     batch_viz_goal_images = TF.resize(goal_image, VISUALIZATION_IMAGE_SIZE[::-1])
                 else:
                     batch_viz_obs_images = None
                     batch_viz_goal_images = None
-                batch_obs_images = [transform(obs) for obs in obs_images]
-                batch_obs_images = torch.cat(batch_obs_images, dim=1).to(device, non_blocking=non_blocking)
-                batch_goal_images = transform(goal_image).to(device, non_blocking=non_blocking)
+                batch_obs_images = normalize_image_tensor(
+                    obs_image.to(device, non_blocking=non_blocking)
+                )
+                batch_goal_images = normalize_image_tensor(
+                    goal_image.to(device, non_blocking=non_blocking)
+                )
                 actions = actions.to(device, non_blocking=non_blocking)
                 action_mask = action_mask.to(device, non_blocking=non_blocking)
                 distance = distance.float().to(device, non_blocking=non_blocking)

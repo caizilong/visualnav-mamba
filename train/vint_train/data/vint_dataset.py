@@ -185,8 +185,15 @@ class ViNT_Dataset(Dataset):
                         pass
                     raise
 
-        # Reopen the cache file in read-only mode
-        self._image_cache: lmdb.Environment = lmdb.open(cache_filename, readonly=True)
+        # Reopen the cache file in read-only mode. Disable file locks for
+        # DataLoader worker read-only access and keep OS readahead enabled.
+        self._image_cache: lmdb.Environment = lmdb.open(
+            cache_filename,
+            readonly=True,
+            lock=False,
+            readahead=True,
+            max_readers=2048,
+        )
 
     def _build_index(self, use_tqdm: bool = False):
         """
@@ -250,19 +257,18 @@ class ViNT_Dataset(Dataset):
             with open(index_to_data_path, "wb") as f:
                 pickle.dump((self.index_to_data, self.goals_index), f)
 
+    def _load_image_from_txn(self, txn, trajectory_name, time):
+        """Load one pre-resized image tensor using an existing LMDB transaction."""
+        image_path = get_data_path(self.data_folder, trajectory_name, time)
+        image_buffer = txn.get(image_path.encode())
+        if image_buffer is None:
+            raise FileNotFoundError(f"Image missing from LMDB cache: {image_path}")
+        return pickle.loads(image_buffer)
+
     def _load_image(self, trajectory_name, time):
         """Load pre-resized image tensor from LMDB cache."""
-        image_path = get_data_path(self.data_folder, trajectory_name, time)
-
-        try:
-            with self._image_cache.begin() as txn:
-                image_buffer = txn.get(image_path.encode())
-                tensor_bytes = bytes(image_buffer)
-            # 直接加载已经 resize 好的 tensor
-            resized_tensor = pickle.loads(tensor_bytes)
-            return resized_tensor
-        except TypeError:
-            print(f"Failed to load image {image_path}")
+        with self._image_cache.begin() as txn:
+            return self._load_image_from_txn(txn, trajectory_name, time)
 
     def _compute_actions(self, traj_data, curr_time, goal_time):
         start_index = curr_time
@@ -345,12 +351,13 @@ class ViNT_Dataset(Dataset):
         else:
             raise ValueError(f"Invalid context type {self.context_type}")
 
-        obs_image = torch.cat([
-            self._load_image(f, t) for f, t in context
-        ])
+        with self._image_cache.begin() as txn:
+            obs_image = torch.cat([
+                self._load_image_from_txn(txn, f, t) for f, t in context
+            ])
 
-        # Load goal image
-        goal_image = self._load_image(f_goal, goal_time)
+            # Load goal image
+            goal_image = self._load_image_from_txn(txn, f_goal, goal_time)
 
         # Load other trajectory data
         curr_traj_data = self._get_trajectory(f_curr)
