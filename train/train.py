@@ -248,8 +248,12 @@ def main(config):
         "persistent_workers": train_num_workers > 0,
         "pin_memory": torch.cuda.is_available(),
     }
-    if train_num_workers > 0:
-        train_loader_kwargs["prefetch_factor"] = int(config.get("prefetch_factor", 4))
+    # Only set prefetch_factor when explicitly configured; otherwise let PyTorch
+    # default to 2 (minimum, most memory-efficient). Large prefetch_factor values
+    # can cause significant memory bloat in persistent worker processes.
+    _prefetch = config.get("prefetch_factor")
+    if train_num_workers > 0 and _prefetch is not None and int(_prefetch) > 0:
+        train_loader_kwargs["prefetch_factor"] = int(_prefetch)
     train_loader = DataLoader(train_dataset, **train_loader_kwargs)
 
     if "eval_batch_size" not in config:
@@ -268,8 +272,13 @@ def main(config):
             "pin_memory": torch.cuda.is_available(),
             "persistent_workers": eval_num_workers > 0,
         }
+        # Only set prefetch_factor when explicitly configured; otherwise let
+        # PyTorch default to 2. Use eval-specific override if provided,
+        # falling back to the general prefetch_factor.
         if eval_num_workers > 0:
-            eval_loader_kwargs["prefetch_factor"] = int(config.get("eval_prefetch_factor", config.get("prefetch_factor", 4)))
+            _eval_prefetch = config.get("eval_prefetch_factor", config.get("prefetch_factor"))
+            if _eval_prefetch is not None and int(_eval_prefetch) > 0:
+                eval_loader_kwargs["prefetch_factor"] = int(_eval_prefetch)
         test_dataloaders[dataset_type] = DataLoader(dataset, **eval_loader_kwargs)
 
     def _training_cleanup():
@@ -337,7 +346,7 @@ def main(config):
     latest_checkpoint = None
     resume_checkpoint = None
     if "load_run" in config:
-        load_project_folder = os.path.join("/root/autodl-tmp/logs", config["load_run"])
+        load_project_folder = os.path.join("/logs", config["load_run"])
         print("Loading model from", load_project_folder)
 
         training_latest_path = os.path.join(load_project_folder, "training_latest.pth")
@@ -504,7 +513,7 @@ def main(config):
                     latest_checkpoint.get("scheduler_state_dict", latest_checkpoint.get("scheduler"))
                 )
 
-            load_project_folder = os.path.join("/root/autodl-tmp/logs", config["load_run"])
+            load_project_folder = os.path.join("/logs", config["load_run"])
             if optimizer_state is None:
                 optimizer_latest_path = os.path.join(load_project_folder, "optimizer_latest.pth")
                 if os.path.exists(optimizer_latest_path):
@@ -602,7 +611,7 @@ if __name__ == "__main__":
 
     config["run_name"] += "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
     config["project_folder"] = os.path.join(
-        "/root/autodl-tmp/logs",
+        "/logs",
         config["project_name"],
         config["run_name"],
     )

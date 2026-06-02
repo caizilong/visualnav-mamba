@@ -1,7 +1,5 @@
-version: "3.9"
-
 services:
-  cai:
+  visualnav-mamba:
     build:
       context: .
       dockerfile: Dockerfile.visualnav
@@ -19,55 +17,17 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - DISPLAY=${DISPLAY}
-      - QT_X11_NO_MITSHM=1
 
-    shm_size: "64g"
+    # PyTorch DataLoader 多进程需要 host IPC，否则会报共享内存不足
+    ipc: host
+    shm_size: "32g"
 
     volumes:
       - /dev/shm:/dev/shm
       - ~/visualnav-mamba:/workspace
+      - /home/extra:/home/extra
 
     working_dir: /workspace
-
-    tty: true
-    stdin_open: true
-    command: /bin/bash
-
-  nomad_mamba_train_deployment:
-    image: cai-snapshot:latest
-    container_name: nomad_mamba_train_deployment
-    network_mode: host
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - DISPLAY=${DISPLAY}
-      - QT_X11_NO_MITSHM=1
-
-    # Training + deployment runtime settings
-    shm_size: "64g"
-    ipc: host
-    mem_limit: "64g"
-    memswap_limit: "64g"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-
-    volumes:
-      - /dev/shm:/dev/shm
-      - /home/czl/CARLA:/home/czl/CARLA
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-
-    working_dir: /home/czl/CARLA
 
     tty: true
     stdin_open: true

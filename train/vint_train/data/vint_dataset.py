@@ -1,3 +1,4 @@
+import collections
 import gc
 import numpy as np
 import os
@@ -115,7 +116,10 @@ class ViNT_Dataset(Dataset):
         # use this index to retrieve the dataset name from the data_config.yaml
         self.dataset_index = dataset_names.index(self.dataset_name)
         self.data_config = all_data_config[self.dataset_name]
-        self.trajectory_cache = {}
+        # LRU cache for trajectory data, bounded to prevent unbounded memory growth
+        # in persistent worker processes across epochs.
+        self.trajectory_cache = collections.OrderedDict()
+        self._max_trajectory_cache_size = 2000  # ~24MB with typical 12KB trajectories
         self._load_index()
         self._build_caches()
         
@@ -311,10 +315,16 @@ class ViNT_Dataset(Dataset):
     
     def _get_trajectory(self, trajectory_name):
         if trajectory_name in self.trajectory_cache:
+            # Move to end (most recently used) for LRU ordering
+            self.trajectory_cache.move_to_end(trajectory_name)
             return self.trajectory_cache[trajectory_name]
         else:
             with open(os.path.join(self.data_folder, trajectory_name, "traj_data.pkl"), "rb") as f:
                 traj_data = pickle.load(f)
+            # Evict oldest entries if cache exceeds limit, preventing unbounded
+            # memory growth in persistent DataLoader workers across epochs.
+            while len(self.trajectory_cache) >= self._max_trajectory_cache_size:
+                self.trajectory_cache.popitem(last=False)  # FIFO eviction of oldest
             self.trajectory_cache[trajectory_name] = traj_data
             return traj_data
 
