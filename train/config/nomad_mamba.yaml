@@ -116,7 +116,7 @@ guidance_distance_scale: 10.0            # 距离预测转目标置信度的指�
 
 # ---------------- 上下文设置 ----------------
 context_type: temporal
-context_size: 4                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
+context_size: 6                           # 历史帧数（temporal 上下文）；增大可加强时序建模但增加显存
 alpha: 1e-4                               # 与原 NoMaD 相同：距离损失权重很小
 
 # ---------------- 距离 / 动作 标签范围 ----------------

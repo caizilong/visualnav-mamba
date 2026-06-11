@@ -346,7 +346,7 @@ def main(config):
     latest_checkpoint = None
     resume_checkpoint = None
     if "load_run" in config:
-        load_project_folder = os.path.join("/logs", config["load_run"])
+        load_project_folder = os.path.join("./logs", config["load_run"])
         print("Loading model from", load_project_folder)
 
         training_latest_path = os.path.join(load_project_folder, "training_latest.pth")
@@ -513,7 +513,7 @@ def main(config):
                     latest_checkpoint.get("scheduler_state_dict", latest_checkpoint.get("scheduler"))
                 )
 
-            load_project_folder = os.path.join("/logs", config["load_run"])
+            load_project_folder = os.path.join("./logs", config["load_run"])
             if optimizer_state is None:
                 optimizer_latest_path = os.path.join(load_project_folder, "optimizer_latest.pth")
                 if os.path.exists(optimizer_latest_path):
@@ -611,7 +611,7 @@ if __name__ == "__main__":
 
     config["run_name"] += "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
     config["project_folder"] = os.path.join(
-        "/logs",
+        "./logs",
         config["project_name"],
         config["run_name"],
     )
