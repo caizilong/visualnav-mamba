@@ -1,20 +1,16 @@
-import numpy as np
-import os
-from PIL import Image
-from typing import Any, Iterable, Tuple
-
-import torch
-from torchvision import transforms
-import torchvision.transforms.functional as TF
-import torch.nn.functional as F
 import io
-from typing import Union
+import os
+from typing import Tuple, Union
+
+import numpy as np
+from PIL import Image
+import torch
+import torchvision.transforms.functional as TF
 
 VISUALIZATION_IMAGE_SIZE = (160, 120)
 IMAGE_ASPECT_RATIO = (
     4 / 3
 )  # all images are centered cropped to a 4:3 aspect ratio in training
-
 
 
 def get_data_path(data_folder: str, f: str, time: int, data_type: str = "image"):
@@ -64,24 +60,6 @@ def to_local_coords(
     return (positions - curr_pos).dot(rotmat)
 
 
-def calculate_deltas(waypoints: torch.Tensor) -> torch.Tensor:
-    """
-    Calculate deltas between waypoints
-
-    Args:
-        waypoints (torch.Tensor): waypoints
-    Returns:
-        torch.Tensor: deltas
-    """
-    num_params = waypoints.shape[1]
-    origin = torch.zeros(1, num_params)
-    prev_waypoints = torch.concat((origin, waypoints[:-1]), axis=0)
-    deltas = waypoints - prev_waypoints
-    if num_params > 2:
-        return calculate_sin_cos(deltas)
-    return deltas
-
-
 def calculate_sin_cos(waypoints: torch.Tensor) -> torch.Tensor:
     """
     Calculate sin and cos of the angle
@@ -98,43 +76,22 @@ def calculate_sin_cos(waypoints: torch.Tensor) -> torch.Tensor:
     return torch.concat((waypoints[:, :2], angle_repr), axis=1)
 
 
-def transform_images(
-    img: Image.Image, transform: transforms, image_resize_size: Tuple[int, int], aspect_ratio: float = IMAGE_ASPECT_RATIO
-):
-    w, h = img.size
-    if w > h:
-        img = TF.center_crop(img, (h, int(h * aspect_ratio)))  # crop to the right ratio
-    else:
-        img = TF.center_crop(img, (int(w / aspect_ratio), w))
-    viz_img = img.resize(VISUALIZATION_IMAGE_SIZE)
-    viz_img = TF.to_tensor(viz_img)
-    img = img.resize(image_resize_size)
-    transf_img = transform(img)
-    return viz_img, transf_img
-
-
-def resize_and_aspect_crop(
-    img: Image.Image, image_resize_size: Tuple[int, int], aspect_ratio: float = IMAGE_ASPECT_RATIO
-):
-    w, h = img.size
-    if w > h:
-        img = TF.center_crop(img, (h, int(h * aspect_ratio)))  # crop to the right ratio
-    else:
-        img = TF.center_crop(img, (int(w / aspect_ratio), w))
-    img = img.resize(image_resize_size)
-    resize_img = TF.to_tensor(img)
-    return resize_img
-
-
-def img_path_to_data(path: Union[str, io.BytesIO], image_resize_size: Tuple[int, int]) -> torch.Tensor:
-    """
-    Load an image from a path and transform it
-    Args:
-        path (str): path to the image
-        image_resize_size (Tuple[int, int]): size to resize the image to
-    Returns:
-        torch.Tensor: resized image as tensor
-    """
-    # return transform_images(Image.open(path), transform, image_resize_size, aspect_ratio)
-    return resize_and_aspect_crop(Image.open(path), image_resize_size)    
-
+def img_path_to_data(
+    path: Union[str, io.BytesIO],
+    image_resize_size: Tuple[int, int],
+) -> torch.Tensor:
+    """Load and resize an image as a CHW uint8 tensor."""
+    with Image.open(path) as img:
+        img = img.convert("RGB")
+        width, height = img.size
+        if width > height:
+            img = TF.center_crop(
+                img,
+                (height, int(height * IMAGE_ASPECT_RATIO)),
+            )
+        else:
+            img = TF.center_crop(
+                img,
+                (int(width / IMAGE_ASPECT_RATIO), width),
+            )
+        return TF.pil_to_tensor(img.resize(image_resize_size))

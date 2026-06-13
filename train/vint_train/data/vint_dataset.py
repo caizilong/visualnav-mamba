@@ -1,17 +1,16 @@
 import collections
 import gc
-import numpy as np
 import os
 import pickle
-import yaml
-from typing import Any, Dict, List, Optional, Tuple
-import tqdm
-import io
-import lmdb
+import shutil
+from typing import Tuple
 
+import lmdb
+import numpy as np
 import torch
 from torch.utils.data import Dataset
-import torchvision.transforms.functional as TF
+import tqdm
+import yaml
 
 from vint_train.data.data_utils import (
     img_path_to_data,
@@ -19,6 +18,10 @@ from vint_train.data.data_utils import (
     get_data_path,
     to_local_coords,
 )
+
+IMAGE_CACHE_FORMAT = b"uint8_v1"
+IMAGE_CACHE_COMPLETE_KEY = b"__visualnav_cache_complete__"
+
 
 class ViNT_Dataset(Dataset):
     def __init__(
@@ -40,8 +43,6 @@ class ViNT_Dataset(Dataset):
         end_slack: int = 0,
         goals_per_obs: int = 1,
         normalize: bool = True,
-        obs_type: str = "image",
-        goal_type: str = "image",
     ):
         """
         Main ViNT dataset class
@@ -61,7 +62,6 @@ class ViNT_Dataset(Dataset):
             end_slack (int): Number of timesteps to ignore at the end of the trajectory
             goals_per_obs (int): Number of goals to sample per observation
             normalize (bool): Whether to normalize the distances or actions
-            goal_type (str): What data type to use for the goal. The only one supported is "image" for now.
         """
         self.data_folder = data_folder
         self.data_split_folder = data_split_folder
@@ -100,8 +100,6 @@ class ViNT_Dataset(Dataset):
         self.end_slack = end_slack
         self.goals_per_obs = goals_per_obs
         self.normalize = normalize
-        self.obs_type = obs_type
-        self.goal_type = goal_type
 
         # load data/data_config.yaml
         with open(
@@ -140,20 +138,36 @@ class ViNT_Dataset(Dataset):
     def _build_caches(self, use_tqdm: bool = True):
         """
         Build a cache of images for faster loading using LMDB.
-        Images are pre-resized to the target size during cache building for better training efficiency.
+        Images are pre-resized and stored as uint8 tensors. The model input is
+        converted to float32 only after the batch is moved to the target device.
         """
-        # 缓存文件名包含 image_size，以区分不同尺寸的缓存
         img_w, img_h = self.image_size
         cache_filename = os.path.join(
             self.data_split_folder,
             f"dataset_{self.dataset_name}_{img_w}x{img_h}.lmdb",
         )
 
-        """
-        If the cache file doesn't exist, create it by iterating through the dataset,
-        pre-resize images to target size, and writing to the cache.
-        """
-        if not os.path.exists(cache_filename):
+        cache_is_complete = False
+        if os.path.exists(cache_filename):
+            try:
+                with lmdb.open(
+                    cache_filename,
+                    readonly=True,
+                    lock=False,
+                    readahead=False,
+                ) as image_cache:
+                    with image_cache.begin() as txn:
+                        cache_is_complete = (
+                            txn.get(IMAGE_CACHE_COMPLETE_KEY)
+                            == IMAGE_CACHE_FORMAT
+                        )
+            except lmdb.Error:
+                cache_is_complete = False
+
+        if not cache_is_complete:
+            if os.path.exists(cache_filename):
+                shutil.rmtree(cache_filename)
+
             # 构建图像缓存不需要整条轨迹数据；若 _build_index 已把所有 traj 放进
             # trajectory_cache，与单次超长 LMDB 写事务叠加易导致 OOM。此处清空，训练时
             # 再按需 _get_trajectory 从磁盘加载。
@@ -164,7 +178,7 @@ class ViNT_Dataset(Dataset):
                 self.goals_index,
                 disable=not use_tqdm,
                 dynamic_ncols=True,
-                desc=f"Building LMDB cache for {self.dataset_name} (pre-resizing to {img_w}x{img_h})"
+                desc=f"Building uint8 LMDB cache for {self.dataset_name} ({img_w}x{img_h})",
             )
             # 单次 write 事务会持有大量脏页在内存中直到 commit；分批 commit 可限制峰值内存。
             commit_every = 2048
@@ -173,14 +187,23 @@ class ViNT_Dataset(Dataset):
                 try:
                     for i, (traj_name, time) in enumerate(tqdm_iterator):
                         image_path = get_data_path(self.data_folder, traj_name, time)
-                        resized_tensor = img_path_to_data(image_path, self.image_size)
-                        tensor_bytes = pickle.dumps(resized_tensor)
-                        txn.put(image_path.encode(), tensor_bytes)
-                        del resized_tensor, tensor_bytes
+                        resized_tensor = img_path_to_data(
+                            image_path,
+                            self.image_size,
+                        )
+                        txn.put(
+                            image_path.encode(),
+                            resized_tensor.contiguous().numpy().tobytes(),
+                        )
+                        del resized_tensor
                         if (i + 1) % commit_every == 0:
                             txn.commit()
                             txn = image_cache.begin(write=True)
                             gc.collect()
+                    txn.put(
+                        IMAGE_CACHE_COMPLETE_KEY,
+                        IMAGE_CACHE_FORMAT,
+                    )
                     txn.commit()
                 except BaseException:
                     try:
@@ -267,12 +290,17 @@ class ViNT_Dataset(Dataset):
         image_buffer = txn.get(image_path.encode())
         if image_buffer is None:
             raise FileNotFoundError(f"Image missing from LMDB cache: {image_path}")
-        return pickle.loads(image_buffer)
-
-    def _load_image(self, trajectory_name, time):
-        """Load pre-resized image tensor from LMDB cache."""
-        with self._image_cache.begin() as txn:
-            return self._load_image_from_txn(txn, trajectory_name, time)
+        img_w, img_h = self.image_size
+        expected_bytes = 3 * img_w * img_h
+        if len(image_buffer) != expected_bytes:
+            raise ValueError(
+                f"Invalid uint8 image size for {image_path}: "
+                f"expected {expected_bytes} bytes, got {len(image_buffer)}"
+            )
+        return torch.frombuffer(
+            bytearray(image_buffer),
+            dtype=torch.uint8,
+        ).reshape(3, img_h, img_w)
 
     def _compute_actions(self, traj_data, curr_time, goal_time):
         start_index = curr_time
@@ -399,8 +427,8 @@ class ViNT_Dataset(Dataset):
         )
 
         return (
-            torch.as_tensor(obs_image, dtype=torch.float32),
-            torch.as_tensor(goal_image, dtype=torch.float32),
+            obs_image,
+            goal_image,
             actions_torch,
             torch.as_tensor(distance, dtype=torch.int64),
             torch.as_tensor(goal_pos, dtype=torch.float32),

@@ -184,8 +184,6 @@ def main(config):
     test_datasets = {}
 
     config.setdefault("context_type", "temporal")
-    config.setdefault("clip_goals", False)
-    config.setdefault("goal_type", "image")
 
     for dataset_name in config["datasets"]:
         data_config = config["datasets"][dataset_name]
@@ -215,7 +213,6 @@ def main(config):
                 end_slack=data_config["end_slack"],
                 goals_per_obs=data_config["goals_per_obs"],
                 normalize=config["normalize"],
-                goal_type=config["goal_type"],
             )
             if data_split_type == "train":
                 train_dataset.append(dataset)

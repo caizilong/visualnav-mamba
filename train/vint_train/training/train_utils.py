@@ -60,6 +60,9 @@ def get_delta_torch(actions: torch.Tensor) -> torch.Tensor:
 
 
 def normalize_image_tensor(images: torch.Tensor) -> torch.Tensor:
+    if images.dtype != torch.uint8:
+        raise TypeError(f"Expected uint8 image tensor, got {images.dtype}")
+    images = images.float().div_(255.0)
     channels = images.shape[1]
     if channels % 3 != 0:
         raise ValueError(f"Expected image channels to be a multiple of 3, got {channels}")
