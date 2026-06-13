@@ -556,7 +556,6 @@ def main(config):
             current_epoch=current_epoch,
             alpha=float(config["alpha"]),
             use_wandb=config["use_wandb"],
-            use_amp=bool(config.get("use_amp", torch.cuda.is_available())),
             eval_fraction=config["eval_fraction"],
             eval_freq=config["eval_freq"],
             resume_checkpoint=resume_checkpoint if stage_idx == 0 else None,

@@ -12,9 +12,9 @@ ablation_unfreeze_all: true             # 消融实验开关：若为true，则�
 use_wandb: True                           # 是否启用 wandb
 train: True
 train_stage: finetune                      # representation_warmup / diffusion_tuning / finetune
-freeze_backbone: false                     # 预热和策略训练阶段默认冻结 DINOv3，finetune 可设为 false
+freeze_backbone: true                     # 预热和策略训练阶段默认冻结 DINOv3，finetune 可设为 false
 batch_size: 128
-eval_batch_size: 128                      # 评估时使用较小的batch_size以避免OOM
+eval_batch_size: 128                      # 评估时可以使用较小的batch_size以避免OOM
 epochs: 100
 gpu_ids: [0]
 num_workers: 2
@@ -22,7 +22,6 @@ num_workers: 2
 # 不设置（注释掉或删除）则默认 = min(4, num_workers)。
 # 评估阶段I/O压力远小于训练，推荐设为0以节省内存。
 eval_num_workers: 0
-use_amp: false                              # CUDA混合精度训练；如出现nan/inf可设为false回退fp32
 # prefetch_factor — 每个worker预取batch数。不设置则由PyTorch默认为2（最小值，最省内存）。
 # 设置过大会导致persistent worker内存显著膨胀，尤其是在eval_num_workers较大时。
 # 如需覆盖评估loader的预取因子，可单独设置 eval_prefetch_factor。
@@ -58,22 +57,25 @@ encoding_size: 384                        # 对齐 ViT-S / DINOv3 的隐藏维�
 #   - DINOv2: vit_small_patch14_dinov2 (patch=14, 图像尺寸需能被14整除)
 #   - DINOv3: vit_small_patch16_dinov3 (内部会映射到 timm 的官方权重名，patch=16，推荐)
 #   - ConvNeXt: convnext_tiny, convnext_small, ...
-obs_encoder: vit_small_patch16_dinov3     # 观测编码器（ViT-S / DINOv3）
-goal_encoder: vit_small_patch16_dinov3    # 目标编码器类型；share_visual_backbone=true 时会实际共享主干
-share_visual_backbone: false               # obs / goal 共用同一套 DINOv3 参数
-use_visual_adapter: false                  # 是否启用 backbone 后的 obs/goal 轻量残差 adapter；消融实验可设为 false
+obs_encoder: vit_base_patch16_dinov3     # 观测编码器（ViT-S / DINOv3）
+goal_encoder: vit_base_patch16_dinov3    # 目标编码器类型；share_visual_backbone=true 时会实际共享主干
+share_visual_backbone: true               # obs / goal 共用同一套 DINOv3 参数
+use_visual_adapter: true                  # 是否启用 backbone 后的 obs/goal 轻量残差 adapter；消融实验可设为 false
 adapter_hidden_dim: 96                    # 轻量 adapter 的瓶颈维度（约为 hidden size 的 1/4）
 adapter_scale: 0.1                        # 小尺度残差注入
+
 use_spatial_mamba_tokens: false           # 消融开关：false=每帧全局池化1个token；true=保留空间tokens并展平成长序列送入Mamba（DINOv3优化实验推荐true）
 drop_backbone_prefix_tokens: true         # 空间token模式下丢弃ViT的CLS/register等prefix tokens，只保留patch tokens
 vit_global_pool: patch_mean                 # 非空间token模式下的ViT池化：all_mean/cls/patch_mean/cls_patch_mean（DINOv3优化实验推荐patch_mean）
 bidirectional_mamba: false               # 前向/反向 Mamba 同时建模，让 goal 信息反向传播到上下文
+
 use_goal_gate: false                     # 是否启用当前帧与 goal 的门控融合
 use_goal_film: false                    # 是否启用 goal-aware FiLM 调制历史 observation tokens
 use_goal_mamba_fusion: false             # 用 goal-observation 匹配特征自适应融合前向/反向 Mamba 信息流
 goal_fusion_hidden_dim: 768             # 目标门控融合 MLP 的隐藏维度（= 2 * encoding_size）
 goal_mamba_fusion_hidden_dim: 384       # goal-modulated bidirectional state-space fusion 的隐藏维度
-use_navigation_aux: false                # 启用导航几何辅助监督，让 DINO/adapter 学习 goal-relative affordance
+
+use_navigation_aux: true                # 启用导航几何辅助监督，让 DINO/adapter 学习 goal-relative affordance
 nav_aux_hidden_dim: 192                 # goal_pos 辅助预测头隐藏维度
 nav_goal_pos_loss_weight: 0.05          # 局部 goal 相对位置预测辅助损失权重
 nav_contrastive_loss_weight: 0.01       # obs-goal 导航表征对比损失权重
