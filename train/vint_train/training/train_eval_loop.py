@@ -85,7 +85,6 @@ def train_eval_loop_nomad(
     epochs: int,
     device: torch.device,
     project_folder: str,
-    train_stage: str = "finetune",
     print_log_freq: int = 100,
     wandb_log_freq: int = 10,
     image_log_freq: int = 1000,
@@ -113,6 +112,7 @@ def train_eval_loop_nomad(
     save_epoch_checkpoints: bool = False,
     save_training_state: bool = False,
     save_optimizer_state: bool = False,
+    lr_scheduler_requires_metric: bool = False,
 ):
     latest_path = os.path.join(project_folder, "latest.pth")
     training_latest_path = os.path.join(project_folder, "training_latest.pth")
@@ -127,7 +127,7 @@ def train_eval_loop_nomad(
     for epoch in range(current_epoch, current_epoch + epochs):
         if train_model:
             print(f"Start NoMaD-Mamba training epoch {epoch}/{current_epoch + epochs - 1}")
-            train_nomad(
+            train_loss = train_nomad(
                 model=model,
                 ema_model=ema_model,
                 optimizer=optimizer,
@@ -138,7 +138,6 @@ def train_eval_loop_nomad(
                 goal_mask_prob=goal_mask_prob,
                 project_folder=project_folder,
                 epoch=epoch,
-                train_stage=train_stage,
                 print_log_freq=print_log_freq,
                 wandb_log_freq=wandb_log_freq,
                 image_log_freq=image_log_freq,
@@ -160,7 +159,10 @@ def train_eval_loop_nomad(
                 max_grad_norm=max_grad_norm,
             )
             if lr_scheduler is not None:
-                lr_scheduler.step()
+                if lr_scheduler_requires_metric:
+                    lr_scheduler.step(metrics=train_loss)
+                else:
+                    lr_scheduler.step()
 
         ema_latest_path = os.path.join(project_folder, "ema_latest.pth")
         ema_model_state_dict = _unwrap_model(ema_model.averaged_model).state_dict()

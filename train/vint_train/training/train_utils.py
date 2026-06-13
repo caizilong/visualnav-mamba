@@ -237,7 +237,6 @@ def train_nomad(
     goal_mask_prob: float,
     project_folder: str,
     epoch: int,
-    train_stage: str = "finetune",
     alpha: float = 1e-4,
     print_log_freq: int = 100,
     wandb_log_freq: int = 10,
@@ -292,6 +291,7 @@ def train_nomad(
     log_window_size = max(int(print_log_freq), 1)
 
     ema_eval_model = ema_model.averaged_model
+    epoch_loss_sum = 0.0
 
     uc_action_loss_logger = Logger("uc_action_loss", "train", window_size=log_window_size)
     uc_action_waypts_cos_sim_logger = Logger(
@@ -401,41 +401,35 @@ def train_nomad(
                     action_mask.mean() + 1e-2
                 )
 
-            if train_stage == "representation_warmup":
-                diffusion_loss = naction.new_tensor(0.0)
-            else:
-                # Sample noise to add to actions：为每条轨迹采样高斯噪声
-                noise = torch.randn_like(naction)
+            # Sample noise to add to actions：为每条轨迹采样高斯噪声
+            noise = torch.randn_like(naction)
 
-                # Sample a diffusion iteration for each data point：每个样本随机选择一个时间步
-                timesteps = torch.randint(
-                    0,
-                    noise_scheduler.config.num_train_timesteps,
-                    (B,),
-                    device=device,
-                ).long()
+            # Sample a diffusion iteration for each data point：每个样本随机选择一个时间步
+            timesteps = torch.randint(
+                0,
+                noise_scheduler.config.num_train_timesteps,
+                (B,),
+                device=device,
+            ).long()
 
-                # Add noise：根据对应时间步的噪声水平，把轨迹从“干净”推到“噪声域”
-                noisy_action = noise_scheduler.add_noise(naction, noise, timesteps)
+            # Add noise：根据对应时间步的噪声水平，把轨迹从“干净”推到“噪声域”
+            noisy_action = noise_scheduler.add_noise(naction, noise, timesteps)
 
-                # 预测噪声残差，使得在该时间步可以从 noisy_action 恢复出原始 clean action
-                noise_pred = model(
-                    "noise_pred_net",
-                    sample=noisy_action,
-                    timestep=timesteps,
-                    global_cond=obsgoal_cond,
-                )
+            # 预测噪声残差，使得在该时间步可以从 noisy_action 恢复出原始 clean action
+            noise_pred = model(
+                "noise_pred_net",
+                sample=noisy_action,
+                timestep=timesteps,
+                global_cond=obsgoal_cond,
+            )
 
-                # L2 loss：在时间和维度上求平均，再用 action_mask 做样本级加权
-                diffusion_loss = action_reduce(
-                    F.mse_loss(noise_pred, noise, reduction="none")
-                )
+            # L2 loss：在时间和维度上求平均，再用 action_mask 做样本级加权
+            diffusion_loss = action_reduce(
+                F.mse_loss(noise_pred, noise, reduction="none")
+            )
 
-            # Total loss：距离与扩散损失的加权和
-            if train_stage == "representation_warmup":
-                loss = dist_loss + nav_aux_loss
-            else:
-                loss = alpha * dist_loss + (1 - alpha) * diffusion_loss + nav_aux_loss
+            # Total loss：距离、扩散与导航辅助损失的加权和
+            loss = alpha * dist_loss + (1 - alpha) * diffusion_loss + nav_aux_loss
 
             # 反向传播并更新参数
             optimizer.zero_grad(set_to_none=True)
@@ -449,6 +443,7 @@ def train_nomad(
 
             # Logging
             loss_cpu = loss.item()
+            epoch_loss_sum += loss_cpu
             tepoch.set_postfix(loss=loss_cpu)
             wandb_payload = None
             if use_wandb and wandb_log_freq != 0 and i % wandb_log_freq == 0:
@@ -535,6 +530,7 @@ def train_nomad(
                     )
                 if ema_was_training:
                     ema_eval_model.train()
+    return epoch_loss_sum / max(num_batches, 1)
 
 
 def evaluate_nomad(

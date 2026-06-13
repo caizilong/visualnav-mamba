@@ -5,7 +5,7 @@ This deployment folder now supports **NoMaD-Mamba only**.
 ## Required files
 
 - Model entry: `deployment/config/models.yaml`
-- Model config: `train/config/nomad_mamba.yaml`
+- Model config: `train/config/defaults.yaml`
 - Weights: `deployment/model_weights/nomad_mamba.pth`
 
 ## Benchmark config

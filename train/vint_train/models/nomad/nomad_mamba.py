@@ -435,9 +435,7 @@ class NoMaD_Mamba(nn.Module):
         goal_encoder: Optional[str] = None,  # 新增：可单独指定 goal 编码器，默认与 obs_encoder 相同
         pretrained_backbone: bool = True,
         obs_encoding_size: Optional[int] = 512,
-        mha_num_attention_heads: Optional[int] = 2,   # 保留接口但目前未使用
         mha_num_attention_layers: Optional[int] = 2,  # 对应为 Mamba 层数
-        mha_ff_dim_factor: Optional[int] = 4,         # 未使用，仅为兼容
         mamba_cfg: Optional["MambaConfig"] = None,
         img_size: Optional[Tuple[int, int]] = None,   # 新增：输入图像尺寸 (H, W)，用于 ViT 类模型
         bidirectional_mamba: bool = True,
