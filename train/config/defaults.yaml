@@ -159,10 +159,10 @@ datasets:
   #   negative_mining: True
 
 # ---------------- 日志与评估配置 ----------------
-print_log_freq: 200                    # 每隔多少个 batch 在终端打印一次
-image_log_freq: 1000                   # 每隔多少个 batch 上传一次图像
+print_log_freq: 100                    # 每隔多少个 batch 在终端打印一次
+image_log_freq: 10000                  # 每隔多少个 batch 上传一次图像
 num_images_log: 8                      # 每次上传几张图
 sampling_metrics_freq: 1000            # 每多少个 batch 运行一次基于扩散采样的指标计算
 eval_fraction: 1.0                     # 评估使用的验证集数量，1.0 表示全部
-wandb_log_freq: 200                    # 每多少个 batch 向 Weights & Biases 上传一次标量日志
+wandb_log_freq: 100                    # 每多少个 batch 向 Weights & Biases 上传一次标量日志
 eval_freq: 1                           # 每多少个 epoch 评估一次

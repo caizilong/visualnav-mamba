@@ -574,7 +574,10 @@ if __name__ == "__main__":
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
 
-    config["run_name"] += "_" + time.strftime("%Y_%m_%d_%H_%M_%S")
+    config_name = os.path.splitext(os.path.basename(args.config))[0]
+    config["run_name"] += (
+        f"_{config_name}_{time.strftime('%Y_%m_%d_%H_%M_%S')}_{os.getpid()}"
+    )
     config["project_folder"] = os.path.join(
         "./logs",
         config["project_name"],

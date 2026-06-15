@@ -20,6 +20,7 @@ from torchvision import transforms
 from vint_train.data.data_utils import VISUALIZATION_IMAGE_SIZE
 from vint_train.training.logger import Logger
 from vint_train.visualizing.action_utils import plot_trajs_and_points
+from vint_train.visualizing.distance_utils import visualize_distance_predictions
 from vint_train.visualizing.visualize_utils import to_numpy
 
 with open(os.path.join(os.path.dirname(__file__), "../data/data_config.yaml"), "r") as f:
@@ -506,6 +507,32 @@ def train_nomad(
                 ema_was_training = ema_eval_model.training
                 ema_eval_model.eval()
                 with torch.inference_mode():
+                    no_goal_mask = torch.zeros(
+                        (batch_goal_images.shape[0],),
+                        dtype=torch.long,
+                        device=device,
+                    )
+                    distance_cond = ema_eval_model(
+                        "vision_encoder",
+                        obs_img=batch_obs_images,
+                        goal_img=batch_goal_images,
+                        input_goal_mask=no_goal_mask,
+                    ).flatten(start_dim=1)
+                    distance_pred = ema_eval_model(
+                        "dist_pred_net",
+                        obsgoal_cond=distance_cond,
+                    )
+                    visualize_distance_predictions(
+                        batch_viz_obs_images,
+                        batch_viz_goal_images,
+                        distance_pred,
+                        distance,
+                        "train",
+                        project_folder,
+                        epoch,
+                        num_images_log,
+                        use_wandb,
+                    )
                     visualize_diffusion_action_distribution(
                         ema_eval_model,
                         noise_scheduler,
@@ -682,6 +709,12 @@ def evaluate_nomad(
                     goal_img=batch_goal_images,
                     input_goal_mask=goal_mask,
                 )
+                distance_pred = None
+                if should_log_images:
+                    distance_pred = ema_model(
+                        "dist_pred_net",
+                        obsgoal_cond=obsgoal_cond,
+                    )
 
                 deltas = get_delta_torch(actions)
                 naction = normalize_data_torch(deltas, ACTION_STATS)
@@ -789,6 +822,17 @@ def evaluate_nomad(
                     wandb.log(wandb_payload, commit=True)
 
                 if should_log_images:
+                    visualize_distance_predictions(
+                        batch_viz_obs_images,
+                        batch_viz_goal_images,
+                        distance_pred,
+                        distance,
+                        eval_type,
+                        project_folder,
+                        epoch,
+                        num_images_log,
+                        use_wandb,
+                    )
                     visualize_diffusion_action_distribution(
                         ema_model,
                         noise_scheduler,

@@ -144,3 +144,4 @@ dmypy.json
 .pyre/
 
 diffusion_policy/
+visualnav-transformer
