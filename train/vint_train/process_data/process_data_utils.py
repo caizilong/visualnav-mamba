@@ -5,10 +5,21 @@ import rosbag
 from PIL import Image
 import cv2
 from typing import Any, Tuple, List, Dict
-import torchvision.transforms.functional as TF
 
 IMAGE_SIZE = (160, 120)
 IMAGE_ASPECT_RATIO = 4 / 3
+
+
+def center_crop_pil(img: Image.Image, output_size: Tuple[int, int]) -> Image.Image:
+    crop_h, crop_w = output_size
+    width, height = img.size
+    if crop_h > height or crop_w > width:
+        raise ValueError(
+            f"Requested crop {(crop_h, crop_w)} is larger than image {(height, width)}"
+        )
+    left = int(round((width - crop_w) / 2.0))
+    top = int(round((height - crop_h) / 2.0))
+    return img.crop((left, top, left + crop_w, top + crop_h))
 
 
 def process_images(im_list: List, img_process_func) -> List:
@@ -54,9 +65,7 @@ def process_scand_img(msg) -> Image:
     img = Image.open(io.BytesIO(msg.data))
     # center crop image to 4:3 aspect ratio
     w, h = img.size
-    img = TF.center_crop(
-        img, (h, int(h * IMAGE_ASPECT_RATIO))
-    )  # crop to the right ratio
+    img = center_crop_pil(img, (h, int(h * IMAGE_ASPECT_RATIO)))
     # resize image to IMAGE_SIZE
     img = img.resize(IMAGE_SIZE)
     return img
@@ -70,6 +79,92 @@ def process_sacson_img(msg) -> Image:
     image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
     pil_image = Image.fromarray(image_np)
     return pil_image
+
+
+def process_turtlebot3_img(msg) -> Image:
+    """Convert Gazebo TurtleBot3 fisheye Image messages to PIL RGB images."""
+    encoding = msg.encoding.lower()
+
+    if encoding in {"rgb8", "bgr8"}:
+        channels = 3
+    elif encoding in {"rgba8", "bgra8"}:
+        channels = 4
+    elif encoding == "mono8":
+        channels = 1
+    else:
+        raise ValueError(f"Unsupported TurtleBot3 image encoding: {msg.encoding}")
+
+    expected_row_bytes = msg.width * channels
+    if msg.step < expected_row_bytes:
+        raise ValueError(
+            "Invalid TurtleBot3 image step: "
+            f"step={msg.step}, width={msg.width}, channels={channels}"
+        )
+
+    row_data = np.frombuffer(msg.data, dtype=np.uint8)
+    expected_total_bytes = msg.height * msg.step
+    if row_data.size < expected_total_bytes:
+        raise ValueError(
+            "TurtleBot3 image data is shorter than height * step: "
+            f"data={row_data.size}, height={msg.height}, step={msg.step}"
+        )
+
+    rows = row_data[:expected_total_bytes].reshape(msg.height, msg.step)
+    img = rows[:, :expected_row_bytes].reshape(msg.height, msg.width, channels)
+
+    if encoding == "bgr8":
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    elif encoding == "bgra8":
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+    elif encoding == "rgba8":
+        img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+    elif encoding == "mono8":
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+
+    return Image.fromarray(np.ascontiguousarray(img))
+
+
+def process_igibson_img(msg) -> Image:
+    """Convert iGibson fisheye Image messages to PIL RGB images."""
+    encoding = msg.encoding.lower()
+
+    if encoding in {"rgb8", "bgr8"}:
+        channels = 3
+    elif encoding in {"rgba8", "bgra8"}:
+        channels = 4
+    elif encoding == "mono8":
+        channels = 1
+    else:
+        raise ValueError(f"Unsupported iGibson image encoding: {msg.encoding}")
+
+    expected_row_bytes = msg.width * channels
+    if msg.step < expected_row_bytes:
+        raise ValueError(
+            "Invalid iGibson image step: "
+            f"step={msg.step}, width={msg.width}, channels={channels}"
+        )
+
+    row_data = np.frombuffer(msg.data, dtype=np.uint8)
+    expected_total_bytes = msg.height * msg.step
+    if row_data.size < expected_total_bytes:
+        raise ValueError(
+            "iGibson image data is shorter than height * step: "
+            f"data={row_data.size}, height={msg.height}, step={msg.step}"
+        )
+
+    rows = row_data[:expected_total_bytes].reshape(msg.height, msg.step)
+    img = rows[:, :expected_row_bytes].reshape(msg.height, msg.width, channels)
+
+    if encoding == "bgr8":
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    elif encoding == "bgra8":
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+    elif encoding == "rgba8":
+        img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
+    elif encoding == "mono8":
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+
+    return Image.fromarray(np.ascontiguousarray(img))
 
 
 #######################################################################

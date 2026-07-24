@@ -19,8 +19,24 @@ from vint_train.data.data_utils import (
     to_local_coords,
 )
 
-IMAGE_CACHE_FORMAT = b"uint8_v1"
+IMAGE_CACHE_FORMAT = b"uint8_resize_only_v2"
 IMAGE_CACHE_COMPLETE_KEY = b"__visualnav_cache_complete__"
+
+
+class NumpyCompatUnpickler(pickle.Unpickler):
+    """Read trajectory pickles saved under a different NumPy module layout."""
+
+    def find_class(self, module, name):
+        if module.startswith("numpy._core"):
+            module = module.replace("numpy._core", "numpy.core", 1)
+        elif module.startswith("numpy.core") and not hasattr(np, "core"):
+            module = module.replace("numpy.core", "numpy._core", 1)
+        return super().find_class(module, name)
+
+
+def load_pickle_compat(path):
+    with open(path, "rb") as f:
+        return NumpyCompatUnpickler(f).load()
 
 
 class ViNT_Dataset(Dataset):
@@ -231,8 +247,9 @@ class ViNT_Dataset(Dataset):
 
         for traj_name in tqdm.tqdm(self.traj_names, disable=not use_tqdm, dynamic_ncols=True):
             # 直接从磁盘读取 traj 长度，避免 _get_trajectory 把所有轨迹常驻内存导致 OOM
-            with open(os.path.join(self.data_folder, traj_name, "traj_data.pkl"), "rb") as f:
-                traj_data = pickle.load(f)
+            traj_data = load_pickle_compat(
+                os.path.join(self.data_folder, traj_name, "traj_data.pkl")
+            )
             traj_len = len(traj_data["position"])
             del traj_data
 
@@ -276,8 +293,7 @@ class ViNT_Dataset(Dataset):
         )
         try:
             # load the index_to_data if it already exists (to save time)
-            with open(index_to_data_path, "rb") as f:
-                self.index_to_data, self.goals_index = pickle.load(f)
+            self.index_to_data, self.goals_index = load_pickle_compat(index_to_data_path)
         except:
             # if the index_to_data file doesn't exist, create it
             self.index_to_data, self.goals_index = self._build_index()
@@ -347,8 +363,9 @@ class ViNT_Dataset(Dataset):
             self.trajectory_cache.move_to_end(trajectory_name)
             return self.trajectory_cache[trajectory_name]
         else:
-            with open(os.path.join(self.data_folder, trajectory_name, "traj_data.pkl"), "rb") as f:
-                traj_data = pickle.load(f)
+            traj_data = load_pickle_compat(
+                os.path.join(self.data_folder, trajectory_name, "traj_data.pkl")
+            )
             # Evict oldest entries if cache exceeds limit, preventing unbounded
             # memory growth in persistent DataLoader workers across epochs.
             while len(self.trajectory_cache) >= self._max_trajectory_cache_size:

@@ -1,0 +1,8 @@
+max_v: 0.2
+max_w: 0.4
+frame_rate: 4
+graph_rate: 0.3333
+
+vel_teleop_topic: /cmd_vel
+vel_navi_topic: /cmd_vel
+vel_recovery_topic: /cmd_vel

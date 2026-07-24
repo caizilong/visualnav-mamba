@@ -10,7 +10,7 @@ import torchvision.transforms.functional as TF
 VISUALIZATION_IMAGE_SIZE = (160, 120)
 IMAGE_ASPECT_RATIO = (
     4 / 3
-)  # all images are centered cropped to a 4:3 aspect ratio in training
+)  # kept for deployment utility compatibility; training no longer crops images
 
 
 def get_data_path(data_folder: str, f: str, time: int, data_type: str = "image"):
@@ -80,18 +80,7 @@ def img_path_to_data(
     path: Union[str, io.BytesIO],
     image_resize_size: Tuple[int, int],
 ) -> torch.Tensor:
-    """Load and resize an image as a CHW uint8 tensor."""
+    """Load an RGB image and resize directly as a CHW uint8 tensor."""
     with Image.open(path) as img:
         img = img.convert("RGB")
-        width, height = img.size
-        if width > height:
-            img = TF.center_crop(
-                img,
-                (height, int(height * IMAGE_ASPECT_RATIO)),
-            )
-        else:
-            img = TF.center_crop(
-                img,
-                (int(width / IMAGE_ASPECT_RATIO), width),
-            )
         return TF.pil_to_tensor(img.resize(image_resize_size))

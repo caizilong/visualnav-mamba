@@ -2,8 +2,8 @@
 # global params for diffusion model
 # normalized min and max
 action_stats:
-  min: [-2.5, -4] # [min_dx, min_dy]
-  max: [5, 4] # [max_dx, max_dy]
+  min: [-1.5, -2.0] # [min_dx, min_dy]
+  max: [2.0, 2.0] # [max_dx, max_dy]
 
 # data specific params
 recon:
@@ -61,5 +61,17 @@ sacson:
   metric_waypoint_spacing: 0.255
 
 # add your own dataset params here:
+turtlebot3_gazebo:
+  metric_waypoint_spacing: 0.05
+  center_crop: false
+
+igibson:
+  metric_waypoint_spacing: 0.05
+  center_crop: false
+
+igibson_legacy:
+  metric_waypoint_spacing: 0.05
+  center_crop: false
+
 carla_dataset:
   metric_waypoint_spacing: 0.5

@@ -1,9 +1,11 @@
+import os
+
 # topic names for ROS communication
 
 # image obs topics
-FRONT_IMAGE_TOPIC = "/usb_cam_front/image_raw"
-REVERSE_IMAGE_TOPIC = "/usb_cam_reverse/image_raw"
-IMAGE_TOPIC = "/usb_cam/image_raw"
+FRONT_IMAGE_TOPIC = os.environ.get("FRONT_IMAGE_TOPIC", "/usb_cam_front/image_raw")
+REVERSE_IMAGE_TOPIC = os.environ.get("REVERSE_IMAGE_TOPIC", "/usb_cam_reverse/image_raw")
+IMAGE_TOPIC = os.environ.get("IMAGE_TOPIC", "/usb_cam/image_raw")
 
 # exploration topics
 SUBGOALS_TOPIC = "/subgoals"
@@ -29,7 +31,7 @@ VIZ_NAV_IMAGE_TOPIC = "/nav_image"
 CHOSEN_SUBGOAL_TOPIC = "/chosen_subgoal"
 
 # recorded ont the robot
-ODOM_TOPIC = "/odom"
+ODOM_TOPIC = os.environ.get("ODOM_TOPIC", "/odom")
 BUMPER_TOPIC = "/mobile_base/events/bumper"
 JOY_BUMPER_TOPIC = "/joy_bumper"
 

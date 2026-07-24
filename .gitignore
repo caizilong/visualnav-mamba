@@ -8,6 +8,9 @@ train/wandb/*
 
 *.png
 *.jpg
+*.bag
+*.active
+*.lmdb/
 *.pth
 *.mp4
 *.gif
@@ -144,4 +147,11 @@ dmypy.json
 .pyre/
 
 diffusion_policy/
-visualnav-transformer
+visualnav-transformer/
+worlds/
+scripts/igibson
+scripts/turtlebot3_gazebo
+scripts/cleanup.sh
+
+# CARLA deployment runs are local experiment artifacts.
+deployment/logs/

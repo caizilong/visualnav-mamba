@@ -1,6 +1,7 @@
 import argparse
 import os
 import time
+import cv2
 
 import numpy as np
 import rospy
@@ -11,15 +12,21 @@ from PIL import Image as PILImage
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32MultiArray
 
-from topic_names import IMAGE_TOPIC, SAMPLED_ACTIONS_TOPIC, WAYPOINT_TOPIC
-from utils import load_model, msg_to_pil, to_numpy, transform_images
+from topic_names import IMAGE_TOPIC, SAMPLED_ACTIONS_TOPIC, WAYPOINT_TOPIC, VIZ_NAV_IMAGE_TOPIC
+from utils import load_model, msg_to_pil, to_numpy, transform_images, pil_to_msg
 from vint_train.training.train_utils import get_action
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TOPOMAP_IMAGES_DIR = os.path.normpath(os.path.join(BASE_DIR, "../topomaps/images"))
-ROBOT_CONFIG_PATH = os.path.normpath(os.path.join(BASE_DIR, "../config/robot.yaml"))
-MODEL_CONFIG_PATH = os.path.normpath(os.path.join(BASE_DIR, "../config/models.yaml"))
+ROBOT_CONFIG_PATH = os.environ.get(
+    "ROBOT_CONFIG_PATH",
+    os.path.normpath(os.path.join(BASE_DIR, "../config/robot.yaml")),
+)
+MODEL_CONFIG_PATH = os.environ.get(
+    "MODEL_CONFIG_PATH",
+    os.path.normpath(os.path.join(BASE_DIR, "../config/models.yaml")),
+)
 
 with open(ROBOT_CONFIG_PATH, "r") as f:
     robot_config = yaml.safe_load(f)
@@ -28,13 +35,16 @@ RATE = robot_config["frame_rate"]
 
 context_queue = []
 context_size = None
+latest_raw_img = None  # stores latest raw camera image for trajectory visualization
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
 
 def callback_obs(msg):
+    global latest_raw_img
     obs_img = msg_to_pil(msg)
+    latest_raw_img = obs_img  # keep raw image for visualization overlay
     if context_size is None:
         return
     if len(context_queue) < context_size + 1:
@@ -42,6 +52,118 @@ def callback_obs(msg):
     else:
         context_queue.pop(0)
         context_queue.append(obs_img)
+
+
+def draw_trajectory_minimap(img, naction_all, selected_idx, chosen_wp_idx):
+    """Draw all 8 sampled trajectories as a top-down minimap overlay on the camera image.
+
+    Args:
+        img: numpy array (H, W, 3) BGR image
+        naction_all: (num_samples, len_traj_pred, 2) — all trajectories in robot-frame meters
+        selected_idx: which trajectory index is the selected one
+        chosen_wp_idx: which waypoint index is the chosen control point
+
+    Returns:
+        annotated BGR image (numpy array)
+    """
+    H, W = img.shape[:2]
+    num_samples = len(naction_all)
+
+    # Minimap position (bottom-right corner)
+    mm_w, mm_h = 300, 280
+    mm_margin = 20
+    mm_x1 = W - mm_w - mm_margin
+    mm_y1 = H - mm_h - mm_margin
+    mm_x2 = mm_x1 + mm_w
+    mm_y2 = mm_y1 + mm_h
+
+    # Colors for up to 8 trajectories (BGR order)
+    colors = [
+        (0, 255, 0),     # green  — selected
+        (255, 255, 0),   # cyan
+        (255, 0, 255),   # magenta
+        (0, 255, 255),   # yellow
+        (0, 165, 255),   # orange
+        (255, 0, 0),     # blue
+        (0, 0, 255),     # red
+        (255, 255, 255), # white
+    ]
+
+    # Adapt scale to trajectory extent
+    all_pts = naction_all.reshape(-1, 2)
+    max_extent = max(float(np.abs(all_pts).max()), 0.3)
+    scale = (mm_h * 0.35) / max_extent  # px per meter
+
+    # Origin (robot position) in minimap pixel coords
+    ox = mm_x1 + mm_w // 2
+    oy = mm_y1 + int(mm_h * 0.85)
+
+    def robot_to_pixel(x, y):
+        """Convert robot-frame (x=forward, y=left) to minimap (x=right, y=up)."""
+        px = int(ox - y * scale)
+        py = int(oy - x * scale)
+        return px, py
+
+    # Semi-transparent background
+    overlay = img.copy()
+    cv2.rectangle(overlay, (mm_x1, mm_y1), (mm_x2, mm_y2), (35, 35, 35), -1)
+    cv2.addWeighted(overlay, 0.55, img, 0.45, 0, img)
+
+    # Border
+    cv2.rectangle(img, (mm_x1, mm_y1), (mm_x2, mm_y2), (100, 100, 100), 1)
+
+    # Grid lines every 0.5 m
+    grid_step = 0.5
+    grid_extent = max_extent + grid_step
+    for g in np.arange(-grid_extent, grid_extent + grid_step, grid_step):
+        gx, _ = robot_to_pixel(g, 0.0)
+        if mm_x1 < gx < mm_x2:
+            cv2.line(img, (gx, mm_y1), (gx, mm_y2), (55, 55, 55), 1, cv2.LINE_AA)
+        _, gy = robot_to_pixel(0.0, g)
+        if mm_y1 < gy < mm_y2:
+            cv2.line(img, (mm_x1, gy), (mm_x2, gy), (55, 55, 55), 1, cv2.LINE_AA)
+
+    # Robot position triangle
+    rx, ry = robot_to_pixel(0, 0)
+    tri_size = 8
+    tri_pts = np.array([
+        [rx, ry - tri_size],
+        [rx - tri_size // 2, ry + tri_size // 2],
+        [rx + tri_size // 2, ry + tri_size // 2],
+    ], dtype=np.int32)
+    cv2.fillPoly(img, [tri_pts], (0, 200, 0))
+
+    # Draw each trajectory
+    for i in range(num_samples):
+        traj = naction_all[i]
+        color = colors[i % len(colors)]
+        thickness = 2 if i == selected_idx else 1
+
+        # Collect pixel positions
+        pts = [robot_to_pixel(float(wp[0]), float(wp[1])) for wp in traj]
+
+        # Draw line segments
+        for j in range(len(pts) - 1):
+            cv2.line(img, pts[j], pts[j + 1], color, thickness, cv2.LINE_AA)
+
+        # Draw waypoint markers
+        for j, pt in enumerate(pts):
+            if i == selected_idx and j == chosen_wp_idx:
+                cv2.circle(img, pt, 5, (0, 255, 0), -1, cv2.LINE_AA)
+                cv2.circle(img, pt, 6, (255, 255, 255), 1, cv2.LINE_AA)
+            else:
+                cv2.circle(img, pt, 2, color, -1, cv2.LINE_AA)
+
+    # Labels
+    cv2.putText(img, "Trajectories (top-down)", (mm_x1 + 6, mm_y1 + 17),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1, cv2.LINE_AA)
+    cv2.putText(img, f"scale: {scale:.0f} px/m  |  samples: {num_samples}",
+                (mm_x1 + 6, mm_y1 + 36),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 150, 150), 1, cv2.LINE_AA)
+    cv2.putText(img, "selected", (mm_x1 + 6, mm_y1 + 52),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1, cv2.LINE_AA)
+
+    return img
 
 
 def apply_benchmark_config(args: argparse.Namespace, section: str) -> argparse.Namespace:
@@ -114,10 +236,12 @@ def _load_model_params(model_name: str):
     with open(model_config_path, "r") as f:
         model_params = yaml.safe_load(f)
 
-    if model_params.get("model_type") != "nomad" or model_params.get("vision_encoder") != "nomad_mamba":
+    valid_model = model_params.get("model_type") == "nomad"
+    valid_encoder = model_params.get("vision_encoder") in ("nomad_mamba", "nomad_vint")
+    if not valid_model or not valid_encoder:
         raise ValueError(
-            "navigate.py only supports NoMaD-Mamba configs: "
-            "`model_type: nomad` and `vision_encoder: nomad_mamba`."
+            "navigate.py only supports NoMaD configs: "
+            "`model_type: nomad` and `vision_encoder: nomad_mamba` or `nomad_vint`."
         )
 
     ckpt_path = model_paths[model_name]["ckpt_path"]
@@ -147,7 +271,16 @@ def main(args: argparse.Namespace):
     guidance_distance_scale = max(float(model_params.get("guidance_distance_scale", 10.0)), 1e-6)
 
     topomap_dir = os.path.join(TOPOMAP_IMAGES_DIR, args.dir)
-    topomap_filenames = sorted(os.listdir(topomap_dir), key=lambda x: int(os.path.splitext(x)[0]))
+    topomap_filenames = sorted(
+        [
+            name
+            for name in os.listdir(topomap_dir)
+            if name.lower().endswith(".png") and os.path.splitext(name)[0].isdigit()
+        ],
+        key=lambda x: int(os.path.splitext(x)[0]),
+    )
+    if not topomap_filenames:
+        raise FileNotFoundError(f"No numeric PNG topomap nodes found in {topomap_dir}")
     num_nodes = len(topomap_filenames)
     topomap = []
     for i in range(num_nodes):
@@ -155,6 +288,7 @@ def main(args: argparse.Namespace):
         topomap.append(PILImage.open(image_path))
 
     closest_node = 0
+    goal_hit_count = 0
     assert -1 <= args.goal_node < len(topomap), "Invalid goal index"
     goal_node = len(topomap) - 1 if args.goal_node == -1 else args.goal_node
 
@@ -164,6 +298,7 @@ def main(args: argparse.Namespace):
     waypoint_pub = rospy.Publisher(WAYPOINT_TOPIC, Float32MultiArray, queue_size=1)
     sampled_actions_pub = rospy.Publisher(SAMPLED_ACTIONS_TOPIC, Float32MultiArray, queue_size=1)
     goal_pub = rospy.Publisher("/topoplan/reached_goal", Bool, queue_size=1)
+    viz_pub = rospy.Publisher(VIZ_NAV_IMAGE_TOPIC, Image, queue_size=1)
 
     print("Registered with master node. Waiting for image observations...")
 
@@ -175,6 +310,7 @@ def main(args: argparse.Namespace):
         prediction_type="epsilon",
     )
 
+    naction_all = np.zeros((0,))  # placeholder for trajectory visualization
     while not rospy.is_shutdown():
         chosen_waypoint = np.zeros(4)
         if len(context_queue) > model_params["context_size"]:
@@ -258,6 +394,7 @@ def main(args: argparse.Namespace):
                 print("time elapsed:", time.time() - start_time)
 
             naction = to_numpy(get_action(naction))
+            naction_all = naction.copy()  # save all trajectories for visualization
             sampled_actions_msg = Float32MultiArray()
             sampled_actions_msg.data = np.concatenate((np.array([0]), naction.flatten()))
             sampled_actions_pub.publish(sampled_actions_msg)
@@ -271,10 +408,25 @@ def main(args: argparse.Namespace):
         waypoint_msg.data = chosen_waypoint
         waypoint_pub.publish(waypoint_msg)
 
-        reached_goal = closest_node == goal_node
+        if closest_node == goal_node:
+            goal_hit_count += 1
+        else:
+            goal_hit_count = 0
+        reached_goal = goal_hit_count >= args.goal_confirmations
         goal_pub.publish(reached_goal)
         if reached_goal:
-            print("Reached goal! Stopping...")
+            print(f"Reached goal after {goal_hit_count} consecutive confirmations. Stopping...")
+            break
+
+        # --- Trajectory visualization overlay ---
+        if latest_raw_img is not None and naction_all.size > 1:
+            try:
+                viz_img = np.array(latest_raw_img.convert('RGB'))[:, :, ::-1].copy()
+                viz_img = draw_trajectory_minimap(viz_img, naction_all, selected_idx=0, chosen_wp_idx=args.waypoint)
+                viz_msg = pil_to_msg(PILImage.fromarray(viz_img[:, :, ::-1]), encoding="rgb8")
+                viz_pub.publish(viz_msg)
+            except Exception:
+                pass  # never let visualization errors crash navigation
 
         rate.sleep()
 
@@ -335,6 +487,12 @@ if __name__ == "__main__":
         default=8,
         type=int,
         help="number of sampled trajectories",
+    )
+    parser.add_argument(
+        "--goal-confirmations",
+        default=5,
+        type=int,
+        help="number of consecutive goal-node localizations required before publishing reached_goal",
     )
     parser.add_argument(
         "--guidance-min",

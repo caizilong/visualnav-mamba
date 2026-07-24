@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import yaml
 from typing import Tuple
@@ -13,7 +15,7 @@ from ros_data import ROSData
 from utils import clip_angle
 
 # CONSTS: 从机器人配置加载控制相关参数
-CONFIG_PATH = "../config/robot.yaml"
+CONFIG_PATH = os.environ.get("ROBOT_CONFIG_PATH", "../config/robot.yaml")
 with open(CONFIG_PATH, "r") as f:
 	robot_config = yaml.safe_load(f)
 MAX_V = robot_config["max_v"]           # 最大线速度
@@ -22,7 +24,7 @@ VEL_TOPIC = robot_config["vel_navi_topic"]
 DT = 1/robot_config["frame_rate"]       # 控制周期
 RATE = 9
 EPS = 1e-8
-WAYPOINT_TIMEOUT = 1 # seconds # TODO: tune this
+WAYPOINT_TIMEOUT = 3 # seconds # increased from 1 to avoid false timeouts during brief inference slowdowns
 FLIP_ANG_VEL = np.pi/4
 
 # GLOBALS: waypoint 来自主导航模块（如 navigate.py）

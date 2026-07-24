@@ -27,3 +27,23 @@ sacson:
   odom_process_func: "nav_to_xy_yaw"
 
 # add your own datasets below:
+turtlebot3_gazebo:
+  odomtopics: "/odom"
+  imtopics: "/camera/fisheye/image_raw"
+  ang_offset: 0.0
+  img_process_func: "process_turtlebot3_img"
+  odom_process_func: "nav_to_xy_yaw"
+
+igibson:
+  odomtopics: "/odom"
+  imtopics: "/camera/fisheye/image_raw"
+  ang_offset: 0.0
+  img_process_func: "process_igibson_img"
+  odom_process_func: "nav_to_xy_yaw"
+
+igibson_legacy:
+  odomtopics: "/odom"
+  imtopics: "/gibson_ros/camera/rgb/image"
+  ang_offset: 0.0
+  img_process_func: "process_igibson_img"
+  odom_process_func: "nav_to_xy_yaw"

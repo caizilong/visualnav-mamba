@@ -1,0 +1,13 @@
+nomad_mamba_carla:
+  config_path: "../../train/config/defaults.yaml"
+  # Trained with goal_mask_prob=0.3 and drop_backbone_prefix_tokens=true.
+  ckpt_path: "../../train/logs/nomad/nomad_mamba_defaults1_2026_07_16_20_40_59_1927/ema_latest.pth"
+
+# Preserved for controlled comparison. This is the previously deployed checkpoint,
+# trained without goal masking and with prefix tokens retained.
+nomad_mamba_carla_goal_mask0:
+  config_path: "../../train/config/defaults.yaml"
+  ckpt_path: "../model_weights/ema_latest.pth"
+  config_overrides:
+    goal_mask_prob: 0
+    drop_backbone_prefix_tokens: false

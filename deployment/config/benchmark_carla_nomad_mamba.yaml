@@ -1,0 +1,47 @@
+common:
+  model: nomad_mamba_carla
+  camera_type: fisheye
+  record_width: 224
+  record_height: 224
+  fisheye_fov: 180
+  fisheye_model: equidistant
+  fov_mask: true
+  fov_fade_size: 0.0
+  vehicle_filter: vehicle.mini.cooper_s
+  # Match carla_simple_control.py: 24 simulation FPS / 3 ticks per sample = 8 Hz.
+  frame_rate: 8.0
+  # Match train/vint_train/data/data_config.yaml -> carla_dataset.
+  metric_waypoint_spacing: 0.5
+  steer_gain: 1.0
+  max_steer: 0.25
+  steer_smoothing: 0.25
+  # Reduce the chance that one bad waypoint creates a hard turn at 4 m/s.
+  high_speed_steer_start: 2.5
+  high_speed_steer_full: 4.0
+  high_speed_max_steer: 0.18
+  wheelbase: 2.5
+  max_wheel_angle: 70.0
+  seed: 0
+  # Keep CARLA debug geometry out of the model's observation camera.
+  draw_world_trajectories: false
+
+navigate:
+  dir: town01_route01_topomap
+  goal_node: -1
+  waypoint: 1
+  # close_threshold is kept in logs for comparisons; control uses a fixed lookahead.
+  close_threshold: 3
+  radius: 4
+  visual_subgoal_offset: 3
+  max_visual_node_advance: 2
+  num_samples: 8
+  guidance_min: 0.25
+  guidance_max: 1.75
+  guidance_power: 1.5
+
+explore:
+  no_topomap: true
+  waypoint: 1
+  num_samples: 8
+  trajectory_selection: median
+  max_v_override: 2.0

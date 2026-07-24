@@ -12,6 +12,14 @@ import rosbag
 from vint_train.process_data.process_data_utils import *
 
 
+def str_to_bool(value: str) -> bool:
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise argparse.ArgumentTypeError("expected 'true' or 'false'")
+
+
 def main(args: argparse.Namespace):
 
     # load the config file
@@ -40,6 +48,12 @@ def main(args: argparse.Namespace):
             print(f"Error loading {bag_path}. Skipping...")
             continue
 
+        # skip empty bags (e.g. rosbag auto-disabled due to low disk)
+        if b.get_message_count() == 0:
+            print(f"{bag_path} is empty (0 messages). Skipping...")
+            b.close()
+            continue
+
         # name is that folders separated by _ and then the last part of the path
         traj_name = "_".join(bag_path.split("/")[-2:])[:-4]
 
@@ -61,7 +75,10 @@ def main(args: argparse.Namespace):
             )
             continue
         # remove backwards movement
-        cut_trajs = filter_backwards(bag_img_data, bag_traj_data)
+        if args.filter_backwards:
+            cut_trajs = filter_backwards(bag_img_data, bag_traj_data)
+        else:
+            cut_trajs = [(bag_img_data, bag_traj_data)]
 
         for i, (img_data_i, traj_data_i) in enumerate(cut_trajs):
             traj_name_i = traj_name + f"_{i}"
@@ -117,6 +134,13 @@ if __name__ == "__main__":
         default=4.0,
         type=float,
         help="sampling rate (default: 4.0 hz)",
+    )
+    parser.add_argument(
+        "--filter-backwards",
+        default=True,
+        type=str_to_bool,
+        metavar="{true,false}",
+        help="whether to split trajectories by removing non-forward motion",
     )
 
     args = parser.parse_args()

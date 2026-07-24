@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import sys
 
@@ -22,26 +23,34 @@ except ImportError:
     Image = None
 
 import numpy as np
-import torch
-import torch.nn as nn
-import torchvision.transforms.functional as TF
 from PIL import Image as PILImage
-from torchvision import transforms
-from typing import List
+from typing import List, Optional
 
-from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
-from vint_train.data.data_utils import IMAGE_ASPECT_RATIO
-from vint_train.models.nomad.mamba2 import MambaConfig
-from vint_train.models.nomad.nomad import DenseNetwork, NoMaD
-from vint_train.models.nomad.nomad_mamba import NoMaD_Mamba
+
+def _ensure_ml_imports():
+    """Lazy-import heavy ML packages only when needed (e.g. load_model)."""
+    global torch, nn, TF, transforms, ConditionalUnet1D, IMAGE_ASPECT_RATIO
+    global MambaConfig, DenseNetwork, NoMaD, NoMaD_Mamba
+    import torch
+    import torch.nn as nn
+    import torchvision.transforms.functional as TF
+    from torchvision import transforms
+    from diffusion_policy.model.diffusion.conditional_unet1d import ConditionalUnet1D
+    from vint_train.data.data_utils import IMAGE_ASPECT_RATIO
+    from vint_train.models.nomad.mamba2 import MambaConfig
+    from vint_train.models.nomad.nomad import DenseNetwork, NoMaD
+    from vint_train.models.nomad.nomad_mamba import NoMaD_Mamba
 
 
 def load_model(
     model_path: str,
     config: dict,
-    device: torch.device = torch.device("cpu"),
+    device: "Optional[torch.device]" = None,
 ) -> nn.Module:
     """Build NoMaD-Mamba and load checkpoint weights."""
+    _ensure_ml_imports()
+    if device is None:
+        device = torch.device("cpu")
     if config.get("model_type") != "nomad" or config.get("vision_encoder") != "nomad_mamba":
         raise ValueError(
             "This deployment runtime only supports `model_type: nomad` + "
@@ -112,13 +121,14 @@ def pil_to_msg(pil_img: PILImage.Image, encoding="mono8") -> Image:
         raise ImportError("sensor_msgs is required for pil_to_msg; install ROS sensor_msgs first.")
     img = np.asarray(pil_img)
     ros_image = Image(encoding=encoding)
-    ros_image.height, ros_image.width, _ = img.shape
+    ros_image.height, ros_image.width = img.shape[0], img.shape[1]
     ros_image.data = img.ravel().tobytes()
-    ros_image.step = ros_image.width
+    ros_image.step = ros_image.width * (img.shape[2] if img.ndim == 3 else 1)
     return ros_image
 
 
 def to_numpy(tensor):
+    _ensure_ml_imports()
     return tensor.cpu().detach().numpy()
 
 
@@ -128,6 +138,7 @@ def transform_images(
     center_crop: bool = False,
 ) -> torch.Tensor:
     """Convert one or more PIL images into normalized tensor [1, 3*N, H, W]."""
+    _ensure_ml_imports()
     transform_type = transforms.Compose(
         [
             transforms.ToTensor(),
